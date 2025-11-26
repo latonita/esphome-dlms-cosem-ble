@@ -448,6 +448,12 @@ void DlmsCosemBleComponent::remove_bonding() {
   SET_STATE(FsmState::IDLE);
 }
 
+void DlmsCosemBleComponent::reset_error() {
+  if (this->state_ == FsmState::ERROR) {
+    ESP_LOGI(TAG, "Resetting from ERROR state to IDLE");
+    SET_STATE(FsmState::IDLE);
+  }
+}
 void DlmsCosemBleComponent::try_connect() {
   if (this->state_ != FsmState::IDLE) {
     ESP_LOGW(TAG, "Not in IDLE state, can't start data collection. Current state is %s",
@@ -473,12 +479,13 @@ void DlmsCosemBleComponent::try_connect() {
   this->request_iter = this->sensors_.begin();
   this->sensor_iter = this->sensors_.begin();
 
+  ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
   esp_ble_gatt_set_local_mtu(DESIRED_MTU);
 
   esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
   esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
-  // esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
   // uint8_t key_size = 16;
   // esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
   // uint8_t oob_support = ESP_BLE_OOB_DISABLE;

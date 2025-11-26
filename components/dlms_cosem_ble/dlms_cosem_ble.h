@@ -54,6 +54,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
 
   void try_connect();
   void remove_bonding();
+  void reset_error();
 
   
 
