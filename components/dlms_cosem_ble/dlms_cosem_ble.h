@@ -31,7 +31,7 @@ static constexpr size_t RX_HANDLES_NUM = 15;
 static constexpr size_t TX_BUFFER_SIZE = 64;
 static constexpr size_t RX_BUFFER_SIZE = 256;
 
-static constexpr size_t DESIRED_MTU = 64;
+static constexpr size_t DESIRED_MTU = 247;
 
 class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLEClientNode {
  public:
