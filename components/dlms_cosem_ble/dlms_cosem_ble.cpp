@@ -453,8 +453,8 @@ void DlmsCosemBleComponent::try_connect() {
   this->request_iter = this->sensors_.begin();
   this->sensor_iter = this->sensors_.begin();
 
-  ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
-  esp_ble_gatt_set_local_mtu(DESIRED_MTU);
+  // ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
+  // esp_ble_gatt_set_local_mtu(DESIRED_MTU);
 
   // esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
   // esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
