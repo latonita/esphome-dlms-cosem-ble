@@ -128,7 +128,7 @@ void DlmsCosemBleComponent::update() { this->try_connect(); }
 void DlmsCosemBleComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "DLMS/COSEM BLE Component");
   if (this->parent_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  target address: %s", this->parent_->address_str().c_str());
+//    ESP_LOGCONFIG(TAG, "  target address: %s", this->parent_->address_str().c_str());
   } else {
     ESP_LOGCONFIG(TAG, "  target address: not set");
   }
@@ -395,7 +395,7 @@ void DlmsCosemBleComponent::internal_safeguard_() {
            "Internal safeguard. FSM state is %s, My BLE state is %s, Parent "
            "BLE state is %s. Error states count: %u, BLE connecting states count: %u",
            this->state_to_string_(this->state_), ble_client_state_to_string(my_ble_state),
-           ble_client_state_to_string(parent_ble_state));
+           ble_client_state_to_string(parent_ble_state), error_states, ble_connectings);
 
   if (error_states > SAFEGUARD_ERROR_LIMIT || ble_connectings > SAFEGUARD_ERROR_LIMIT) {
     ESP_LOGE(TAG, "Too many errors or BLE connecting states. Rebooting.");
@@ -453,19 +453,28 @@ void DlmsCosemBleComponent::try_connect() {
   this->request_iter = this->sensors_.begin();
   this->sensor_iter = this->sensors_.begin();
 
-  // ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
-  // esp_ble_gatt_set_local_mtu(DESIRED_MTU);
+  ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
+  esp_ble_gatt_set_local_mtu(DESIRED_MTU);
 
-  // esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
-  // esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
-  // uint8_t key_size = 16;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
-  // uint8_t oob_support = ESP_BLE_OOB_DISABLE;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_OOB_SUPPORT, &oob_support, sizeof(uint8_t));
-  // uint8_t bonding = 1;
-  // esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &bonding, sizeof(uint8_t));
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_KBDISP;  // ESP_IO_CAP_IN;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+
+  uint8_t key_size = 16;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
+
+  uint8_t oob_support = ESP_BLE_OOB_DISABLE;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_OOB_SUPPORT, &oob_support, sizeof(uint8_t));
+
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;  
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+
+  uint8_t resp_key = ESP_BLE_ID_KEY_MASK;  
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+
+  this->parent_->set_remote_addr_type(BLE_ADDR_TYPE_RANDOM);
 
   this->parent_->connect();
 }
@@ -487,7 +496,6 @@ bool DlmsCosemBleComponent::ble_discover_characteristics_() {
   auto svc = this->parent_->get_service(this->service_uuid_);
   if (svc == nullptr) {
     ESP_LOGW(TAG, "No DLMS/COSEM service found");
-
   }
 
   esphome::ble_client::BLECharacteristic *chr;
@@ -657,8 +665,8 @@ void DlmsCosemBleComponent::ble_request_next_fragment_() {
   //   return;
   // }
 
-  esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->ch_handle_rx_,
-                                             ESP_GATT_AUTH_REQ_NONE);
+  esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                             this->ch_handle_rx_, ESP_GATT_AUTH_REQ_NONE);
   // if (status != ESP_OK) {
   //   ESP_LOGW(TAG, "Failed to request response read (handle 0x%04X): %d", handle, status);
   //   SET_STATE(FsmState::ERROR);
