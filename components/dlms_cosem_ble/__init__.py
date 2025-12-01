@@ -135,6 +135,16 @@ async def to_code(config):
         time_ = await cg.get_variable(config[CONF_TIME_ID])
         cg.add(var.set_time_source(time_))
 
+    
+    if CONF_SERVICE_UUID in config:
+        cg.add(var.set_service_uuid(config[CONF_SERVICE_UUID]))
+    
+    if CONF_READ_UUID in config:
+        cg.add(var.set_read_char_uuid(config[CONF_READ_UUID]))
+    
+    if CONF_WRITE_UUID in config:
+        cg.add(var.set_write_char_uuid(config[CONF_WRITE_UUID]))
+
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
 

@@ -108,6 +108,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
     struct {
       bool notifications_enabled : 1;
       bool pin_code_was_requested : 1;
+      bool auth_completed : 1;
       bool tx_error : 1;
       bool rx_reply : 1;
     };

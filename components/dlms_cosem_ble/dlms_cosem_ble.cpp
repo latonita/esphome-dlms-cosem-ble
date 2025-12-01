@@ -147,7 +147,7 @@ void DlmsCosemBleComponent::loop() {
     } break;
 
     case FsmState::STARTING: {
-      if (this->flags_.notifications_enabled) {
+      if (this->flags_.notifications_enabled && this->flags_.auth_completed) {
         SET_STATE(FsmState::PREPARING_COMMAND);
       }
     } break;
@@ -493,26 +493,6 @@ void DlmsCosemBleComponent::ble_set_error_() {
 bool DlmsCosemBleComponent::ble_discover_characteristics_() {
   bool result{true};
 
-  // Some stacks do not populate the service cache for 128-bit UUIDs until after characteristic discovery,
-  // so don't fail loudly if get_service() returns nullptr here.
-  auto *svc = this->parent_->get_service(this->service_uuid_);
-
-  if (svc == nullptr) {
-    ESP_LOGW(TAG, "DLMS/COSEM service not found with 128-bit UUID");
-    uint16_t svc16 = 0x0001;
-    svc = this->parent_->get_service(svc16);  // try with 16-bit UUID
-    if (svc == nullptr) {
-      ESP_LOGW(TAG, "DLMS/COSEM service not found with 16-bit UUID");
-    } else {
-      ESP_LOGI(TAG, "DLMS/COSEM service found with 16-bit UUID");
-      this->service_uuid_ = espbt::ESPBTUUID::from_uint16(svc16);
-    }
-  }
-  
-  if (svc && !svc->parsed) {
-    svc->parse_characteristics();
-  }
-
   esphome::ble_client::BLECharacteristic *chr;
   ESP_LOGV(TAG, "Discovering DLMS/COSEM characteristics...");
   if (!this->ch_handle_tx_) {
@@ -524,13 +504,6 @@ bool DlmsCosemBleComponent::ble_discover_characteristics_() {
       this->ch_handle_tx_ = chr->handle;
     }
   }
-  // auto *descr = this->parent_->get_config_descriptor(this->ch_handle_tx_);
-  // if (descr == nullptr) {
-  //   ESP_LOGW(TAG, "No CCCD descriptor found");
-  //   result = false;
-  // } else {
-  //   this->ch_handle_cccd_ = descr->handle;
-  // }
 
   if (this->ch_handle_rx_ == 0) {
     chr = this->parent_->get_characteristic(this->service_uuid_, this->read_char_uuid_);
@@ -725,8 +698,8 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
                 this->parent_->is_paired() ? "YES" : "NO");
 
       if (!this->ble_discover_characteristics_()) {
-        //        SET_STATE(FsmState::ERROR);
-        //        this->parent_->disconnect();
+               SET_STATE(FsmState::ERROR);
+               this->parent_->disconnect();
 
         break;
       }
@@ -862,7 +835,7 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGVV(TAG, "Pairing completed successfully. Did we tell PIN to device ? %s ***",
                   this->flags_.pin_code_was_requested ? "YES" : "NO");
-
+        this->flags_.auth_completed = true;
       } else {
         ESP_LOGE(TAG, "*** Pairing FAILED, reason=%d ***", param->ble_security.auth_cmpl.fail_reason);
       }
