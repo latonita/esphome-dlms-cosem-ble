@@ -13,6 +13,8 @@
 #include <esp_gatt_defs.h>
 #include <esp_heap_caps.h>
 
+#include "dlms_cosem_helpers.h"
+
 #define SET_STATE(st) \
   { \
     ESP_LOGV(TAG, "State change request:"); \
@@ -22,6 +24,7 @@
 static constexpr uint32_t BOOT_TIMEOUT_MS = 10 * 1000;
 static constexpr uint32_t SAFEGUARD_INTERVAL_MS = 30 * 1000;
 static constexpr uint8_t SAFEGUARD_ERROR_LIMIT = 10;
+
 namespace esphome::dlms_cosem_ble {
 
 static const char *const TAG = "dlms_cosem_ble";
@@ -30,12 +33,12 @@ static char empty_str[] = "";
 
 static char format_hex_char(uint8_t v) { return v >= 10 ? 'A' + (v - 10) : '0' + v; }
 
-static std::string format_frame_pretty(const uint8_t *data, size_t length) {
+static ::std::string format_frame_pretty(const uint8_t *data, size_t length) {
   if (length == 0)
     return "";
-  std::string ret;
+  ::std::string ret;
   ret.resize(3 * length - 1);
-  std::ostringstream ss(ret);
+  ::std::ostringstream ss(ret);
 
   for (size_t i = 0; i < length; i++) {
     switch (data[i]) {
@@ -98,6 +101,63 @@ static uint8_t apply_even_parity(uint8_t value) {
   return with_msb & 0x7F;
 }
 
+void DlmsCosemBleComponent::InOutBuffers::init(size_t default_in_buf_size) {
+  BYTE_BUFFER_INIT(&in);
+  bb_capacity(&in, default_in_buf_size);
+  mes_init(&out_msg);
+  reply_init(&reply);
+  this->reset();
+}
+
+void DlmsCosemBleComponent::InOutBuffers::reset() {
+  mes_clear(&out_msg);
+  reply_clear(&reply);
+  reply.complete = 1;
+  out_msg_index = 0;
+  out_msg_data_pos = 0;
+  in.size = 0;
+  in.position = 0;
+  //  amount_in = 0;
+}
+
+void DlmsCosemBleComponent::InOutBuffers::check_and_grow_input(uint16_t more_data) {
+  const uint16_t GROW_EPSILON = 20;
+  if (in.size + more_data > in.capacity) {
+    ESP_LOGVV(TAG0, "Growing input buffer from %d to %d", in.capacity, in.size + more_data + GROW_EPSILON);
+    bb_capacity(&in, in.size + more_data + GROW_EPSILON);
+  }
+}
+
+void DlmsCosemBleComponent::set_server_address(uint16_t address) { this->server_address_ = address; };
+
+uint16_t DlmsCosemBleComponent::set_server_address(uint16_t logicalAddress, uint16_t physicalAddress,
+                                                   unsigned char addressSize) {
+  this->server_address_ = cl_getServerAddress(logicalAddress, physicalAddress, addressSize);
+
+  ESP_LOGD(TAG,
+           "Server address = %d (based on logical_address=%d, "
+           "physical_address=%d, address_size=%d)",
+           this->server_address_, logicalAddress, physicalAddress, addressSize);
+  return this->server_address_;
+}
+
+void DlmsCosemBleComponent::update_server_address(uint16_t addr) {
+  this->server_address_ = addr;
+  cl_clear(&dlms_settings_);
+  cl_init(&dlms_settings_, true, this->client_address_, this->server_address_,
+          this->auth_required_ ? DLMS_AUTHENTICATION_LOW : DLMS_AUTHENTICATION_NONE,
+          this->auth_required_ ? this->password_.c_str() : NULL, DLMS_INTERFACE_TYPE_HDLC);
+
+  this->update();
+}
+
+uint16_t DlmsCosemBleComponent::update_server_address(uint16_t logicalAddress, uint16_t physicalAddress,
+                                                      unsigned char addressSize) {
+  this->set_server_address(logicalAddress, physicalAddress, addressSize);
+  this->update_server_address(this->server_address_);
+  return this->server_address_;
+}
+
 void DlmsCosemBleComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up DLMS/COSEM BLE component");
 
@@ -114,7 +174,16 @@ void DlmsCosemBleComponent::setup() {
     esp_ble_gattc_cache_clean(this->parent_->get_remote_bda());
   }
 
+  cl_init(&dlms_settings_, true, this->client_address_, this->server_address_,
+          this->auth_required_ ? DLMS_AUTHENTICATION_LOW : DLMS_AUTHENTICATION_NONE,
+          this->auth_required_ ? this->password_.c_str() : NULL, DLMS_INTERFACE_TYPE_HDLC);
+
+  this->buffers_.init(DEFAULT_IN_BUF_SIZE);
+
   this->set_timeout(BOOT_TIMEOUT_MS, [this]() {
+    memset(this->buffers_.in.data, 0, buffers_.in.capacity);
+    this->buffers_.in.size = 0;
+    this->buffers_.in.position = 0;
     ESP_LOGD(TAG, "Boot timeout, component is ready to use");
     SET_STATE(FsmState::IDLE);
   });
@@ -132,10 +201,20 @@ void DlmsCosemBleComponent::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  target address: not set");
   }
+  ESP_LOGCONFIG(TAG, "  Supported Meter Types: DLMS/COSEM (SPODES)");
+  ESP_LOGCONFIG(TAG, "  Client address: %d", this->client_address_);
+  ESP_LOGCONFIG(TAG, "  Server address: %d", this->server_address_);
+  ESP_LOGCONFIG(TAG, "  Authentication: %s", this->auth_required_ == DLMS_AUTHENTICATION_NONE ? "None" : "Low");
+  ESP_LOGCONFIG(TAG, "  P*ssword: %s", this->password_.c_str());
+  ESP_LOGCONFIG(TAG, "  Sensors:");
+  for (const auto &sensors : sensors_) {
+    auto &s = sensors.second;
+    ESP_LOGCONFIG(TAG, "    OBIS code: %s, Name: %s", s->get_obis_code().c_str(), s->get_sensor_name().c_str());
+  }
 }
 
-void DlmsCosemBleComponent::register_sensor(DlmsCosemBleSensorBase *sensor) {
-  this->sensors_.insert({sensor->get_request(), sensor});
+void DlmsCosemBleComponent::register_sensor(DlmsCosemSensorBase *sensor) {
+  this->sensors_.insert({sensor->get_obis_code(), sensor});
 }
 
 void DlmsCosemBleComponent::loop() {
@@ -148,8 +227,52 @@ void DlmsCosemBleComponent::loop() {
 
     case FsmState::STARTING: {
       if (this->flags_.notifications_enabled && this->flags_.auth_completed) {
-        SET_STATE(FsmState::PREPARING_COMMAND);
+        SET_STATE(FsmState::OPEN_SESSION);
       }
+    } break;
+
+    case FsmState::COMMS_TX: {
+      this->log_state_();
+      if (buffers_.has_more_messages_to_send()) {
+        send_dlms_messages_();
+      } else {
+        this->set_state_(FsmState::COMMS_RX);
+      }
+    } break;
+
+    case FsmState::COMMS_RX: {
+      this->handle_comms_rx_();
+    } break;
+
+    case FsmState::OPEN_SESSION: {
+      this->handle_open_session_();
+    } break;
+
+    case FsmState::BUFFERS_REQ: {
+      this->handle_buffers_req_();
+    } break;
+
+    case FsmState::MISSION_FAILED: {
+    } break;
+
+    case FsmState::BUFFERS_RCV: {
+      this->handle_buffers_rcv_();
+    } break;
+
+    case FsmState::ASSOCIATION_REQ: {
+      this->handle_association_req_();
+    } break;
+
+    case FsmState::ASSOCIATION_RCV: {
+      this->handle_association_rcv_();
+    } break;
+
+    case FsmState::DATA_RECV: {
+      this->handle_data_recv_();
+    } break;
+
+    case FsmState::DATA_NEXT: {
+      this->handle_data_next_();
     } break;
 
     case FsmState::PREPARING_COMMAND: {
@@ -169,7 +292,7 @@ void DlmsCosemBleComponent::loop() {
       auto req = this->request_iter->first;
       this->prepare_request_frame_(req.c_str());
       ESP_LOGI(TAG, "Sending request %s (%u bytes payload)", req.c_str(), this->tx_data_remaining_);
-      this->send_next_fragment_();
+
     } break;
 
     case FsmState::SENDING_COMMAND: {
@@ -246,6 +369,296 @@ void DlmsCosemBleComponent::loop() {
       // do nothing
       break;
   }
+}
+
+void DlmsCosemBleComponent::handle_comms_rx_() {
+  this->log_state_();
+
+  if (this->check_rx_timeout_()) {
+    ESP_LOGE(TAG, "RX timeout.");
+    this->has_error = true;
+    this->dlms_reading_state_.last_error = DLMS_ERROR_CODE_HARDWARE_FAULT;
+    this->stats_.invalid_frames_ += reading_state_.err_invalid_frames;
+
+    if (reading_state_.mission_critical) {
+      ESP_LOGE(TAG, "Mission critical RX timeout.");
+      this->abort_mission_();
+    } else {
+      // if not move forward
+      reading_state_.err_invalid_frames++;
+      this->set_state_(reading_state_.next_state);
+    }
+    return;
+  }
+
+  // the following basic algorithm to be implemented to read DLMS packet
+  // first version, no retries
+  // 1. receive proper hdlc frame
+  // 2. get data from hdlc frame
+  // 3. if ret = 0 or ret = DLMS_ERROR_CODE_FALSE then stop
+  // 4. check reply->complete. if it is 0 then continue reading, go to 1
+  //
+  // read hdlc frame
+  received_frame_size_ = this->receive_frame_hdlc_();
+
+  if (received_frame_size_ == 0) {
+    // keep reading until proper frame is received
+    return;
+  }
+
+  this->update_last_rx_time_();
+
+  // this->set_state_(reading_state_.next_state);
+
+  auto ret = dlms_getData2(&dlms_settings_, &buffers_.in, &buffers_.reply, 0);
+  if (ret != DLMS_ERROR_CODE_OK || buffers_.reply.complete == 0) {
+    ESP_LOGVV(TAG, "dlms_getData2 ret = %d %s reply.complete = %d", ret, dlms_error_to_string(ret),
+              buffers_.reply.complete);
+  }
+
+  if (ret != DLMS_ERROR_CODE_OK && ret != DLMS_ERROR_CODE_FALSE) {
+    ESP_LOGE(TAG, "dlms_getData2 failed. ret %d %s", ret, dlms_error_to_string(ret));
+    this->reading_state_.err_invalid_frames++;
+    this->set_state_(reading_state_.next_state);
+    return;
+  }
+
+  if (buffers_.reply.complete == 0) {
+    ESP_LOGD(TAG, "DLMS Reply not complete, need more HDLC frames. "
+                  "Continue reading.");
+    // data in multiple frames.
+    // we just keep reading until full reply is received.
+    return;  // keep reading
+  }
+
+  this->update_last_rx_time_();
+  this->set_state_(reading_state_.next_state);
+
+  auto parse_ret = this->dlms_reading_state_.parser_fn();
+  this->dlms_reading_state_.last_error = parse_ret;
+
+  if (parse_ret == DLMS_ERROR_CODE_OK) {
+    //        ESP_LOGD(TAG, "DLSM parser fn result == DLMS_ERROR_CODE_OK");
+
+  } else {
+    ESP_LOGE(TAG, "DLMS parser fn error %d %s", parse_ret, dlms_error_to_string(parse_ret));
+
+    if (reading_state_.mission_critical) {
+      this->abort_mission_();
+    }
+    // if not critical - just move forward
+    // set_state_(FsmState::IDLE);
+  }
+}
+
+void DlmsCosemBleComponent::handle_buffers_req_() {
+  this->log_state_();
+  this->prepare_and_send_dlms_buffers();
+}
+
+void DlmsCosemBleComponent::handle_buffers_rcv_() {
+  this->log_state_();
+  // check the reply and go to next stage
+  // todo smth with buffers reply
+  this->set_state_(FsmState::ASSOCIATION_REQ);
+}
+
+void DlmsCosemBleComponent::handle_association_req_() {
+  this->log_state_();
+  // this->start_comms_and_next(&aarq_rr_, State::ASSOCIATION_RCV);
+  this->prepare_and_send_dlms_aarq();
+}
+
+void DlmsCosemBleComponent::handle_association_rcv_() {
+  // check the reply and go to next stage
+  // todo smth with aarq reply
+  this->set_state_(FsmState::DATA_ENQ_UNIT);
+}
+
+void DlmsCosemBleComponent::handle_data_enq_() {
+  this->log_state_();
+  if (this->loop_state_.request_iter == this->sensors_.end()) {
+    ESP_LOGD(TAG, "All requests done");
+    this->set_state_(FsmState::SESSION_RELEASE);
+    return;
+  }
+
+  auto req = this->loop_state_.request_iter->first;
+  auto sens = this->loop_state_.request_iter->second;
+  auto type = sens->get_obis_class();
+  auto units_were_requested =
+      (sens->get_type() == SensorType::SENSOR && type == DLMS_OBJECT_TYPE_REGISTER && !sens->has_got_scale_and_unit());
+  if (units_were_requested) {
+    auto ret = this->set_sensor_scale_and_unit(static_cast<DlmsCosemSensor *>(sens));
+  }
+
+  this->buffers_.gx_attribute = 2;
+  this->prepare_and_send_dlms_data_request(req.c_str(), type, !units_were_requested);
+}
+
+void DlmsCosemBleComponent::handle_data_recv_() {
+  this->log_state_();
+  this->set_state_(FsmState::DATA_NEXT);
+
+  auto req = this->loop_state_.request_iter->first;
+  auto sens = this->loop_state_.request_iter->second;
+  auto ret = this->set_sensor_value(sens, req.c_str());
+}
+
+void DlmsCosemBleComponent::handle_data_next_() {
+  this->log_state_();
+  this->loop_state_.request_iter = this->sensors_.upper_bound(this->loop_state_.request_iter->first);
+  if (this->loop_state_.request_iter != this->sensors_.end()) {
+    this->set_next_state_delayed_(this->delay_between_requests_ms_, State::DATA_ENQ_UNIT);
+  } else {
+    this->set_next_state_delayed_(this->delay_between_requests_ms_, State::SESSION_RELEASE);
+  }
+}
+
+void DlmsCosemBleComponent::send_dlms_messages_() {
+  // this schedules sending from BLE thread
+  this->send_next_fragment_();
+  // // const int MAX_BYTES_IN_ONE_SHOT = 64;
+  // gxByteBuffer *buffer = buffers_.out_msg.data[buffers_.out_msg_index];
+
+  // int bytes_to_send = buffer->size - buffers_.out_msg_data_pos;
+  // // if (bytes_to_send > 0) {
+  // //   if (bytes_to_send > MAX_BYTES_IN_ONE_SHOT)
+  // //     bytes_to_send = MAX_BYTES_IN_ONE_SHOT;
+
+  // this->write_array(buffer->data + buffers_.out_msg_data_pos, bytes_to_send);
+
+  // //   ESP_LOGVV(TAG, "TX: %s", format_hex_pretty(buffer->data + buffers_.out_msg_data_pos, bytes_to_send).c_str());
+
+  // //   this->update_last_rx_time_();
+  // //   buffers_.out_msg_data_pos += bytes_to_send;
+  // // }
+  // // if (buffers_.out_msg_data_pos >= buffer->size) {
+  // //   buffers_.out_msg_index++;
+  // // }
+}
+
+void DlmsCosemBleComponent::prepare_request_frame_(const std::string &request) {
+  //////////////////////////////////////
+
+  // Prepare the command frame
+  size_t len = snprintf((char *) this->tx_buffer_, TX_BUFFER_SIZE, "/?!\x01R1\x02%s\x03", request.c_str());
+  len++;  // include null terminator
+
+  // Parity
+  for (size_t i = 0; i < len; i++) {
+    this->tx_buffer_[i] = apply_even_parity(this->tx_buffer_[i]);
+  }
+
+  this->tx_data_remaining_ = len;
+  this->tx_ptr_ = &this->tx_buffer_[0];
+
+  this->tx_fragment_started_ = false;
+  this->tx_sequence_counter_ = 0;
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_buffers() {
+  auto make = [this]() {
+    ESP_LOGD(TAG, "cl_snrmRequest %p ", this->buffers_.out_msg.data);
+    return cl_snrmRequest(&this->dlms_settings_, &this->buffers_.out_msg);
+  };
+  auto parse = [this]() { return cl_parseUAResponse(&this->dlms_settings_, &this->buffers_.reply.data); };
+  this->send_dlms_req_and_next(make, parse, FsmState::BUFFERS_RCV, true);
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_aarq() {
+  auto make = [this]() { return cl_aarqRequest(&this->dlms_settings_, &this->buffers_.out_msg); };
+  auto parse = [this]() { return cl_parseAAREResponse(&this->dlms_settings_, &this->buffers_.reply.data); };
+  this->send_dlms_req_and_next(make, parse, FsmState::ASSOCIATION_RCV);
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *obis, int type) {
+  auto ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
+  if (ret != DLMS_ERROR_CODE_OK) {
+    ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
+    this->set_state_(FsmState::DATA_ENQ);
+    return;
+  }
+
+  auto make = [this]() {
+    return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                   &this->buffers_.out_msg);
+  };
+  auto parse = [this]() {
+    return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                          &this->buffers_.reply.dataValue);
+  };
+  this->send_dlms_req_and_next(make, parse, FsmState::DATA_ENQ, false, false);
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis, int type, bool reg_init) {
+  int ret = DLMS_ERROR_CODE_OK;
+  if (reg_init) {
+    ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
+  }
+  if (ret != DLMS_ERROR_CODE_OK) {
+    ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
+    this->set_state_(FsmState::DATA_NEXT);
+    return;
+  }
+
+  auto make = [this]() {
+    return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                   &this->buffers_.out_msg);
+  };
+  auto parse = [this]() {
+    return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                          &this->buffers_.reply.dataValue);
+  };
+  this->send_dlms_req_and_next(make, parse, FsmState::DATA_RECV);
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_release() {
+  auto make = [this]() { return cl_releaseRequest(&this->dlms_settings_, &this->buffers_.out_msg); };
+  auto parse = []() { return DLMS_ERROR_CODE_OK; };
+  this->send_dlms_req_and_next(make, parse, FsmState::DISCONNECT_REQ);
+}
+
+void DlmsCosemBleComponent::prepare_and_send_dlms_disconnect() {
+  auto make = [this]() { return cl_disconnectRequest(&this->dlms_settings_, &this->buffers_.out_msg); };
+  auto parse = []() { return DLMS_ERROR_CODE_OK; };
+  this->send_dlms_req_and_next(make, parse, FsmState::PUBLISH);
+}
+
+void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsResponseParser parser, State next_state,
+                                                   bool mission_critical, bool clear_buffer) {
+  dlms_reading_state_.maker_fn = maker;
+  dlms_reading_state_.parser_fn = parser;
+  dlms_reading_state_.next_state = next_state;
+  dlms_reading_state_.mission_critical = mission_critical;
+  dlms_reading_state_.reply_is_complete = false;
+  dlms_reading_state_.last_error = DLMS_ERROR_CODE_OK;
+
+  // if (clear_buffer) {
+  buffers_.reset();
+  // }
+  int ret = DLMS_ERROR_CODE_OK;
+  if (maker != nullptr) {
+    ret = maker();
+    if (ret != DLMS_ERROR_CODE_OK) {
+      ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'", ret, dlms_error_to_string(ret));
+      this->set_state_(FsmState::IDLE);
+      return;
+    }
+  }
+
+  reading_state_ = {};
+  //  reading_state_.read_fn = read_fn;
+  reading_state_.mission_critical = mission_critical;
+  reading_state_.tries_max = 1;  // retries;
+  reading_state_.tries_counter = 0;
+  //  reading_state_.check_crc = check_crc;
+  reading_state_.next_state = next_state;
+  received_frame_size_ = 0;
+
+  received_complete_reply_ = false;
+
+  set_state_(FsmState::COMMS_TX);
 }
 
 uint8_t DlmsCosemBleComponent::get_values_from_brackets_(char *line, ValueRefsArray &vals) {
@@ -441,17 +854,19 @@ void DlmsCosemBleComponent::try_connect() {
   this->ch_handle_tx_ = 0;
   this->ch_handle_cccd_ = 0;
   this->ch_handle_rx_ = 0;
-  this->tx_fragment_started_ = false;
-  this->tx_sequence_counter_ = 0;
-  this->tx_ptr_ = nullptr;
-  this->tx_data_remaining_ = 0;
+
+  this->buffers_.reset();
+  // this->tx_fragment_started_ = false;
+  // this->tx_sequence_counter_ = 0;
+  // this->tx_ptr_ = nullptr;
+  // this->tx_data_remaining_ = 0;
   this->rx_len_ = 0;
   this->rx_fragments_expected_ = 0;
   this->rx_current_fragment_ = 0;
   this->flags_.raw = 0;
 
-  this->request_iter = this->sensors_.begin();
-  this->sensor_iter = this->sensors_.begin();
+  this->loop_state_.request_iter = this->sensors_.begin();
+  this->loop_state_.sensor_iter = this->sensors_.begin();
 
   ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
   esp_ble_gatt_set_local_mtu(DESIRED_MTU);
@@ -526,30 +941,6 @@ bool DlmsCosemBleComponent::ble_discover_characteristics_() {
   return result;
 }
 
-void DlmsCosemBleComponent::prepare_request_frame_(const std::string &request) {
-  // Prepare the command frame
-  size_t len = snprintf((char *) this->tx_buffer_, TX_BUFFER_SIZE, "/?!\x01R1\x02%s\x03", request.c_str());
-  len++;  // include null terminator
-
-  // Check sum
-  int checksum = 0;
-  for (size_t i = 0; i < len - 5; i++) {
-    checksum += this->tx_buffer_[i + 4];
-  }
-  this->tx_buffer_[len - 1] = static_cast<uint8_t>(checksum & 0x7F);
-
-  // Parity
-  for (size_t i = 0; i < len; i++) {
-    this->tx_buffer_[i] = apply_even_parity(this->tx_buffer_[i]);
-  }
-
-  this->tx_data_remaining_ = len;
-  this->tx_ptr_ = &this->tx_buffer_[0];
-
-  this->tx_fragment_started_ = false;
-  this->tx_sequence_counter_ = 0;
-}
-
 uint16_t DlmsCosemBleComponent::get_max_payload_() const {
   if (this->mtu_ <= 4)
     return 0;
@@ -570,58 +961,52 @@ bool DlmsCosemBleComponent::ble_send_next_fragment_() {
     return false;
   }
 
-  if (this->tx_ptr_ == nullptr || this->tx_data_remaining_ == 0) {
-    ESP_LOGV(TAG, "No data to send");
-    return false;
-  }
-
   uint16_t max_payload = this->get_max_payload_();
   if (max_payload == 0) {
     ESP_LOGW(TAG, "MTU too small to carry command data");
     return false;
   }
 
-  bool more_after_this = this->tx_data_remaining_ > max_payload;
-  uint16_t payload_len = more_after_this ? max_payload : this->tx_data_remaining_;
+  gxByteBuffer *buffer = buffers_.out_msg.data[buffers_.out_msg_index];
+  int bytes_to_send = buffer->size - buffers_.out_msg_data_pos;
 
-  const uint8_t packet_len = payload_len + 1;
-  uint8_t packet[packet_len];
-
-  if (!this->tx_fragment_started_) {
-    this->tx_fragment_started_ = true;
-    this->tx_sequence_counter_ = 0;
-    if (more_after_this) {
-      packet[0] = 0x00;
-    } else {
-      packet[0] = 0x80;
-      if (this->mtu_ > 23)
-        packet[0] |= 0x40;
-    }
-  } else {
-    this->tx_sequence_counter_ = (this->tx_sequence_counter_ + 1) & 0x7F;
-    packet[0] = this->tx_sequence_counter_;
-    if (!more_after_this)
-      packet[0] |= 0x80;
+  if (bytes_to_send <= 0) {
+    ESP_LOGV(TAG, "No data to send");
+    return false;
   }
-  memcpy(packet + 1, this->tx_ptr_, payload_len);
 
-  esp_err_t status =
-      esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->ch_handle_tx_,
-                               packet_len, packet, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+  bool more_after_this{false};
+  if (bytes_to_send > max_payload) {
+    bytes_to_send = max_payload;
+    more_after_this = true;
+  }
+
+  esp_err_t status = esp_ble_gattc_write_char(
+      this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->ch_handle_tx_, bytes_to_send,
+      buffer->data + buffers_.out_msg_data_pos, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+  // this->write_array(buffer->data + buffers_.out_msg_data_pos, bytes_to_send);
+
+  ESP_LOGVV(TAG, "TX: %s", format_hex_pretty(buffer->data + buffers_.out_msg_data_pos, bytes_to_send).c_str());
+
+  // //   this->update_last_rx_time_();
+  buffers_.out_msg_data_pos += bytes_to_send;
+  // // }
+  if (buffers_.out_msg_data_pos >= buffer->size) {
+    buffers_.out_msg_index++;
+  }
+
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "esp_ble_gattc_write_char failed: %d", status);
     return false;
   }
 
-  ESP_LOGV(TAG, "TX: %s", format_hex_pretty(packet, packet_len).c_str());
-
   if (more_after_this) {
-    this->tx_ptr_ += payload_len;
-    this->tx_data_remaining_ -= payload_len;
+    // this->tx_ptr_ += payload_len;
+    // this->tx_data_remaining_ -= payload_len;
     this->send_next_fragment_();
   } else {
-    this->tx_ptr_ = nullptr;
-    this->tx_data_remaining_ = 0;
+    // this->tx_ptr_ = nullptr;
+    // this->tx_data_remaining_ = 0;
   }
   return true;
 }
@@ -698,8 +1083,8 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
                 this->parent_->is_paired() ? "YES" : "NO");
 
       if (!this->ble_discover_characteristics_()) {
-               SET_STATE(FsmState::ERROR);
-               this->parent_->disconnect();
+        SET_STATE(FsmState::ERROR);
+        this->parent_->disconnect();
 
         break;
       }
@@ -785,11 +1170,11 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
       this->ch_handle_cccd_ = 0;
       this->ch_handle_rx_ = 0;
 
-      this->tx_fragment_started_ = false;
-      this->tx_sequence_counter_ = 0;
+      // this->tx_fragment_started_ = false;
+      // this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
-      this->tx_ptr_ = nullptr;
-      this->tx_data_remaining_ = 0;
+      // this->tx_ptr_ = nullptr;
+      // this->tx_data_remaining_ = 0;
       this->rx_len_ = 0;
       this->rx_fragments_expected_ = 0;
       this->rx_current_fragment_ = 0;
@@ -806,14 +1191,14 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
 
 void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
   switch (event) {
-    case ESP_GAP_BLE_PASSKEY_REQ_EVT:
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
         break;
       }
       this->flags_.pin_code_was_requested = true;
       ESP_LOGV(TAG, "Supplying PIN %06u", this->passkey_);
       esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
-      break;
+    } break;
 
     case ESP_GAP_BLE_SEC_REQ_EVT: {
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
@@ -824,8 +1209,7 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
                auth_cmpl.fail_reason, auth_cmpl.auth_mode);
       esp_err_t sec_rsp = esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
       ESP_LOGV(TAG, "esp_ble_gap_security_rsp result: %d", sec_rsp);
-      break;
-    }
+    } break;
 
     case ESP_GAP_BLE_AUTH_CMPL_EVT: {
       if (!this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr)) {
@@ -851,12 +1235,36 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
         this->ble_defer_fn_();
         this->ble_defer_fn_ = nullptr;
       }
-    }
+    } break;
+
     default:
       break;
   }
 }
 
+/*
+    NOT_INITIALIZED = 0,
+    IDLE,
+    STARTING,
+
+    COMMS_TX,
+    COMMS_RX,
+    MISSION_FAILED,
+    BUFFERS_REQ,
+    BUFFERS_RCV,
+    ASSOCIATION_REQ,
+    ASSOCIATION_RCV,
+    DATA_RECV,
+    DATA_NEXT,
+
+    PREPARING_COMMAND,
+    SENDING_COMMAND,
+    READING_RESPONSE,
+    GOT_RESPONSE,
+    PUBLISH,
+    ERROR,
+    DISCONNECTED
+*/
 const char *DlmsCosemBleComponent::state_to_string_(FsmState state) const {
   switch (state) {
     case FsmState::NOT_INITIALIZED:
@@ -865,6 +1273,24 @@ const char *DlmsCosemBleComponent::state_to_string_(FsmState state) const {
       return "IDLE";
     case FsmState::STARTING:
       return "STARTING";
+    case FsmState::COMMS_TX:
+      return "COMMS_TX";
+    case FsmState::COMMS_RX:
+      return "COMMS_RX";
+    case FsmState::MISSION_FAILED:
+      return "MISSION_FAILED";
+    case FsmState::BUFFERS_REQ:
+      return "BUFFERS_REQ";
+    case FsmState::BUFFERS_RCV:
+      return "BUFFERS_RCV";
+    case FsmState::ASSOCIATION_REQ:
+      return "ASSOCIATION_REQ";
+    case FsmState::ASSOCIATION_RCV:
+      return "ASSOCIATION_RCV";
+    case FsmState::DATA_RECV:
+      return "DATA_RECV";
+    case FsmState::DATA_NEXT:
+      return "DATA_NEXT";
     case FsmState::PREPARING_COMMAND:
       return "PREPARING_COMMAND";
     case FsmState::SENDING_COMMAND:

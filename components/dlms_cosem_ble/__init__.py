@@ -149,3 +149,4 @@ async def to_code(config):
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
 
     cg.add(var.set_passkey(config[CONF_PIN]))
+    cg.add_library("GuruxDLMS", None, "https://github.com/latonita/GuruxDLMS.c")
