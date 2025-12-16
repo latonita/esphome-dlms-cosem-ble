@@ -18,7 +18,7 @@
 #define SET_STATE(st) \
   { \
     ESP_LOGV(TAG, "State change request:"); \
-    this->set_state_(st); \
+    this->set_next_state_(st); \
   }
 
 static constexpr uint32_t BOOT_TIMEOUT_MS = 10 * 1000;
@@ -123,7 +123,7 @@ void DlmsCosemBleComponent::InOutBuffers::reset() {
 void DlmsCosemBleComponent::InOutBuffers::check_and_grow_input(uint16_t more_data) {
   const uint16_t GROW_EPSILON = 20;
   if (in.size + more_data > in.capacity) {
-    ESP_LOGVV(TAG0, "Growing input buffer from %d to %d", in.capacity, in.size + more_data + GROW_EPSILON);
+    ESP_LOGVV(TAG, "Growing input buffer from %d to %d", in.capacity, in.size + more_data + GROW_EPSILON);
     bb_capacity(&in, in.size + more_data + GROW_EPSILON);
   }
 }
@@ -166,9 +166,6 @@ void DlmsCosemBleComponent::setup() {
     this->mark_failed();
     return;
   }
-
-  this->request_iter = this->sensors_.begin();
-  this->sensor_iter = this->sensors_.begin();
 
   if (this->parent_->get_remote_bda() != nullptr) {
     esp_ble_gattc_cache_clean(this->parent_->get_remote_bda());
@@ -213,8 +210,14 @@ void DlmsCosemBleComponent::dump_config() {
   }
 }
 
-void DlmsCosemBleComponent::register_sensor(DlmsCosemSensorBase *sensor) {
+void DlmsCosemBleComponent::register_sensor(DlmsCosemBleSensorBase *sensor) {
   this->sensors_.insert({sensor->get_obis_code(), sensor});
+}
+
+void DlmsCosemBleComponent::abort_mission_() {
+  // Existing pull mode logic
+  ESP_LOGE(TAG, "Abort mission. Closing session");
+  this->set_next_state_(FsmState::MISSION_FAILED);
 }
 
 void DlmsCosemBleComponent::loop() {
@@ -225,8 +228,8 @@ void DlmsCosemBleComponent::loop() {
     case FsmState::IDLE: {
     } break;
 
-    case FsmState::STARTING: {
-      if (this->flags_.notifications_enabled && this->flags_.auth_completed) {
+    case FsmState::BLE_STARTING: {
+      if (this->ble_flags_.notifications_enabled && this->ble_flags_.auth_completed) {
         SET_STATE(FsmState::OPEN_SESSION);
       }
     } break;
@@ -236,7 +239,7 @@ void DlmsCosemBleComponent::loop() {
       if (buffers_.has_more_messages_to_send()) {
         send_dlms_messages_();
       } else {
-        this->set_state_(FsmState::COMMS_RX);
+        this->set_next_state_(FsmState::COMMS_RX);
       }
     } break;
 
@@ -275,94 +278,94 @@ void DlmsCosemBleComponent::loop() {
       this->handle_data_next_();
     } break;
 
-    case FsmState::PREPARING_COMMAND: {
-      if (this->request_iter == this->sensors_.end()) {
-        SET_STATE(FsmState::PUBLISH);
-        this->parent_->disconnect();
-        break;
-      }
+      // case FsmState::PREPARING_COMMAND: {
+      //   // if (this->request_iter == this->sensors_.end()) {
+      //   //   SET_STATE(FsmState::PUBLISH);
+      //   //   this->parent_->disconnect();
+      //   //   break;
+      //   // }
 
-      SET_STATE(FsmState::SENDING_COMMAND);
+      //   // SET_STATE(FsmState::SENDING_COMMAND);
 
-      this->rx_len_ = 0;
+      //   // this->rx_len_ = 0;
 
-      this->flags_.tx_error = false;
-      this->flags_.rx_reply = false;
+      //   // this->ble_flags_.tx_error = false;
+      //   // this->ble_flags_.rx_reply = false;
 
-      auto req = this->request_iter->first;
-      this->prepare_request_frame_(req.c_str());
-      ESP_LOGI(TAG, "Sending request %s (%u bytes payload)", req.c_str(), this->tx_data_remaining_);
+      //   // auto req = this->request_iter->first;
+      //   // this->prepare_request_frame_(req.c_str());
+      //   // ESP_LOGI(TAG, "Sending request %s (%u bytes payload)", req.c_str(), this->tx_data_remaining_);
 
-    } break;
+      // } break;
 
-    case FsmState::SENDING_COMMAND: {
-      if (this->flags_.tx_error) {
-        ESP_LOGE(TAG, "Error sending data");
-        SET_STATE(FsmState::ERROR);
-      } else if (this->tx_data_remaining_ == 0) {
-        SET_STATE(FsmState::READING_RESPONSE);
-      }
-    } break;
+      // case FsmState::SENDING_COMMAND: {
+      //   // if (this->ble_flags_.tx_error) {
+      //   //   ESP_LOGE(TAG, "Error sending data");
+      //   //   SET_STATE(FsmState::ERROR);
+      //   // } else if (this->tx_data_remaining_ == 0) {
+      //   //   SET_STATE(FsmState::READING_RESPONSE);
+      //   // }
+      // } break;
 
     case FsmState::READING_RESPONSE: {
-      if (this->flags_.rx_reply) {
+      if (this->ble_flags_.rx_reply) {
         SET_STATE(FsmState::GOT_RESPONSE);
       }
     } break;
 
     case FsmState::GOT_RESPONSE: {
-      do {
-        if (this->rx_len_ == 0)
-          break;
+      // do {
+      //   if (this->rx_len_ == 0)
+      //     break;
 
-        auto brackets_found = get_values_from_brackets_(in_param_ptr, vals);
-        if (!brackets_found)
-          break;
+      //   auto brackets_found = get_values_from_brackets_(in_param_ptr, vals);
+      //   if (!brackets_found)
+      //     break;
 
-        ESP_LOGD(TAG,
-                 "Received name: '%s', values: %d, idx: 1(%s), 2(%s), 3(%s), "
-                 "4(%s), 5(%s), 6(%s), 7(%s), 8(%s), 9(%s), "
-                 "10(%s), 11(%s), 12(%s)",
-                 in_param_ptr, brackets_found, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7],
-                 vals[8], vals[9], vals[10], vals[11]);
+      //   ESP_LOGD(TAG,
+      //            "Received name: '%s', values: %d, idx: 1(%s), 2(%s), 3(%s), "
+      //            "4(%s), 5(%s), 6(%s), 7(%s), 8(%s), 9(%s), "
+      //            "10(%s), 11(%s), 12(%s)",
+      //            in_param_ptr, brackets_found, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
+      //            vals[7], vals[8], vals[9], vals[10], vals[11]);
 
-        if (in_param_ptr[0] == '\0') {
-          if (vals[0][0] == 'E' && vals[0][1] == 'R' && vals[0][2] == 'R') {
-            ESP_LOGE(TAG, "Request '%s' either not supported or malformed. Error code %s", in_param_ptr, vals[0]);
-          } else {
-            ESP_LOGE(TAG, "Request '%s' either not supported or malformed.", in_param_ptr);
-          }
-          break;
-        }
+      //   if (in_param_ptr[0] == '\0') {
+      //     if (vals[0][0] == 'E' && vals[0][1] == 'R' && vals[0][2] == 'R') {
+      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed. Error code %s", in_param_ptr, vals[0]);
+      //     } else {
+      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed.", in_param_ptr);
+      //     }
+      //     break;
+      //   }
 
-        auto req = this->request_iter->first;
-        if (this->request_iter->second->get_function() != in_param_ptr) {
-          ESP_LOGE(TAG, "Returned data name mismatch. Skipping frame");
-          break;
-        }
+      //   auto req = this->request_iter->first;
+      //   if (this->request_iter->second->get_function() != in_param_ptr) {
+      //     ESP_LOGE(TAG, "Returned data name mismatch. Skipping frame");
+      //     break;
+      //   }
 
-        auto range = sensors_.equal_range(req);
-        for (auto it = range.first; it != range.second; ++it) {
-          if (!it->second->is_failed())
-            set_sensor_value_(it->second, vals);
-        }
-      } while (0);
+      //   auto range = sensors_.equal_range(req);
+      //   for (auto it = range.first; it != range.second; ++it) {
+      //     if (!it->second->is_failed())
+      //       set_sensor_value_(it->second, vals);
+      //   }
+      // } while (0);
 
-      this->request_iter = this->sensors_.upper_bound(this->request_iter->first);
-      this->rx_len_ = 0;
-      SET_STATE(FsmState::PREPARING_COMMAND);
+      // this->request_iter = this->sensors_.upper_bound(this->request_iter->first);
+      // this->rx_len_ = 0;
+      // SET_STATE(FsmState::PREPARING_COMMAND);
     } break;
 
     case FsmState::PUBLISH: {
-      if (this->sensor_iter != this->sensors_.end()) {
-        this->sensor_iter->second->publish();
-        this->sensor_iter++;
-      } else {
-        if (this->signal_strength_ != nullptr) {
-          this->signal_strength_->publish_state(this->rssi_);
-        }
-        SET_STATE(FsmState::IDLE);
-      }
+      // if (this->sensor_iter != this->sensors_.end()) {
+      //   this->sensor_iter->second->publish();
+      //   this->sensor_iter++;
+      // } else {
+      //   if (this->signal_strength_ != nullptr) {
+      //     this->signal_strength_->publish_state(this->rssi_);
+      //   }
+      SET_STATE(FsmState::IDLE);
+      //      }
     } break;
 
     case FsmState::ERROR:
@@ -386,8 +389,13 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
     } else {
       // if not move forward
       reading_state_.err_invalid_frames++;
-      this->set_state_(reading_state_.next_state);
+      this->set_next_state_(reading_state_.next_state);
     }
+    return;
+  }
+
+  if (!this->ble_flags_.rx_reply) {
+    // still no data
     return;
   }
 
@@ -408,7 +416,7 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
 
   this->update_last_rx_time_();
 
-  // this->set_state_(reading_state_.next_state);
+  // this->set_next_state_(reading_state_.next_state);
 
   auto ret = dlms_getData2(&dlms_settings_, &buffers_.in, &buffers_.reply, 0);
   if (ret != DLMS_ERROR_CODE_OK || buffers_.reply.complete == 0) {
@@ -419,7 +427,7 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
   if (ret != DLMS_ERROR_CODE_OK && ret != DLMS_ERROR_CODE_FALSE) {
     ESP_LOGE(TAG, "dlms_getData2 failed. ret %d %s", ret, dlms_error_to_string(ret));
     this->reading_state_.err_invalid_frames++;
-    this->set_state_(reading_state_.next_state);
+    this->set_next_state_(reading_state_.next_state);
     return;
   }
 
@@ -432,7 +440,7 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
   }
 
   this->update_last_rx_time_();
-  this->set_state_(reading_state_.next_state);
+  this->set_next_state_(reading_state_.next_state);
 
   auto parse_ret = this->dlms_reading_state_.parser_fn();
   this->dlms_reading_state_.last_error = parse_ret;
@@ -447,8 +455,32 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
       this->abort_mission_();
     }
     // if not critical - just move forward
-    // set_state_(FsmState::IDLE);
+    // set_next_state_(FsmState::IDLE);
   }
+}
+
+void DlmsCosemBleComponent::handle_open_session_() {
+  this->stats_.connections_tried_++;
+  this->loop_state_.session_started_ms = millis();
+  this->log_state_();
+  this->clear_rx_buffers_();
+  this->loop_state_.request_iter = this->sensors_.begin();
+
+  this->set_next_state_(FsmState::BUFFERS_REQ);
+
+  // if (false) {
+  //   // TODO. check if IEC handshake is needed
+
+  //   uint8_t open_cmd[32]{0};
+  //   uint8_t open_cmd_len = snprintf((char *) open_cmd, 32, "/?%s!\r\n",
+  //   this->meter_address_.c_str()); request_iter = this->sensors_.begin();
+  //   this->send_frame_(open_cmd, open_cmd_len);
+  //   this->set_next_state_(FsmState::OPEN_SESSION_GET_ID);
+  //   auto read_fn = [this]() { return this->receive_frame_ascii_(); };
+  //   // mission crit, no crc
+  //   this->read_reply_and_go_next_state_(read_fn,
+  //   FsmState::OPEN_SESSION_GET_ID, 0, true, false);
+  // }
 }
 
 void DlmsCosemBleComponent::handle_buffers_req_() {
@@ -460,26 +492,26 @@ void DlmsCosemBleComponent::handle_buffers_rcv_() {
   this->log_state_();
   // check the reply and go to next stage
   // todo smth with buffers reply
-  this->set_state_(FsmState::ASSOCIATION_REQ);
+  this->set_next_state_(FsmState::ASSOCIATION_REQ);
 }
 
 void DlmsCosemBleComponent::handle_association_req_() {
   this->log_state_();
-  // this->start_comms_and_next(&aarq_rr_, State::ASSOCIATION_RCV);
+  // this->start_comms_and_next(&aarq_rr_, FsmState::ASSOCIATION_RCV);
   this->prepare_and_send_dlms_aarq();
 }
 
 void DlmsCosemBleComponent::handle_association_rcv_() {
   // check the reply and go to next stage
   // todo smth with aarq reply
-  this->set_state_(FsmState::DATA_ENQ_UNIT);
+  this->set_next_state_(FsmState::DATA_ENQ_UNIT);
 }
 
 void DlmsCosemBleComponent::handle_data_enq_() {
   this->log_state_();
   if (this->loop_state_.request_iter == this->sensors_.end()) {
     ESP_LOGD(TAG, "All requests done");
-    this->set_state_(FsmState::SESSION_RELEASE);
+    this->set_next_state_(FsmState::SESSION_RELEASE);
     return;
   }
 
@@ -489,7 +521,7 @@ void DlmsCosemBleComponent::handle_data_enq_() {
   auto units_were_requested =
       (sens->get_type() == SensorType::SENSOR && type == DLMS_OBJECT_TYPE_REGISTER && !sens->has_got_scale_and_unit());
   if (units_were_requested) {
-    auto ret = this->set_sensor_scale_and_unit(static_cast<DlmsCosemSensor *>(sens));
+    auto ret = this->set_sensor_scale_and_unit(static_cast<DlmsCosemBleSensor *>(sens));
   }
 
   this->buffers_.gx_attribute = 2;
@@ -498,7 +530,7 @@ void DlmsCosemBleComponent::handle_data_enq_() {
 
 void DlmsCosemBleComponent::handle_data_recv_() {
   this->log_state_();
-  this->set_state_(FsmState::DATA_NEXT);
+  this->set_next_state_(FsmState::DATA_NEXT);
 
   auto req = this->loop_state_.request_iter->first;
   auto sens = this->loop_state_.request_iter->second;
@@ -509,15 +541,32 @@ void DlmsCosemBleComponent::handle_data_next_() {
   this->log_state_();
   this->loop_state_.request_iter = this->sensors_.upper_bound(this->loop_state_.request_iter->first);
   if (this->loop_state_.request_iter != this->sensors_.end()) {
-    this->set_next_state_delayed_(this->delay_between_requests_ms_, State::DATA_ENQ_UNIT);
+    this->set_next_state_delayed_(this->delay_between_requests_ms_, FsmState::DATA_ENQ_UNIT);
   } else {
-    this->set_next_state_delayed_(this->delay_between_requests_ms_, State::SESSION_RELEASE);
+    this->set_next_state_delayed_(this->delay_between_requests_ms_, FsmState::SESSION_RELEASE);
   }
+}
+
+void DlmsCosemBleComponent::clear_rx_buffers_() {
+  memset(this->buffers_.in.data, 0, buffers_.in.capacity);
+  this->buffers_.in.size = 0;
+  this->buffers_.in.position = 0;
+}
+
+size_t DlmsCosemBleComponent::receive_frame_hdlc_() {
+  // // HDLC frame: <FLAG>data<FLAG>
+  // auto frame_end_check_hdlc = [](uint8_t *b, size_t s) {
+  //   auto ret = s >= 2 && b[0] == HDLC_FLAG && b[s - 1] == HDLC_FLAG;
+  //   return ret;
+  // };
+  // return receive_frame_(frame_end_check_hdlc);
+  return 0;
 }
 
 void DlmsCosemBleComponent::send_dlms_messages_() {
   // this schedules sending from BLE thread
   this->send_next_fragment_();
+  
   // // const int MAX_BYTES_IN_ONE_SHOT = 64;
   // gxByteBuffer *buffer = buffers_.out_msg.data[buffers_.out_msg_index];
 
@@ -538,24 +587,24 @@ void DlmsCosemBleComponent::send_dlms_messages_() {
   // // }
 }
 
-void DlmsCosemBleComponent::prepare_request_frame_(const std::string &request) {
-  //////////////////////////////////////
+// void DlmsCosemBleComponent::prepare_request_frame_(const std::string &request) {
+//   //////////////////////////////////////
 
-  // Prepare the command frame
-  size_t len = snprintf((char *) this->tx_buffer_, TX_BUFFER_SIZE, "/?!\x01R1\x02%s\x03", request.c_str());
-  len++;  // include null terminator
+//   // Prepare the command frame
+//   size_t len = snprintf((char *) this->tx_buffer_, TX_BUFFER_SIZE, "/?!\x01R1\x02%s\x03", request.c_str());
+//   len++;  // include null terminator
 
-  // Parity
-  for (size_t i = 0; i < len; i++) {
-    this->tx_buffer_[i] = apply_even_parity(this->tx_buffer_[i]);
-  }
+//   // Parity
+//   for (size_t i = 0; i < len; i++) {
+//     this->tx_buffer_[i] = apply_even_parity(this->tx_buffer_[i]);
+//   }
 
-  this->tx_data_remaining_ = len;
-  this->tx_ptr_ = &this->tx_buffer_[0];
+//   this->tx_data_remaining_ = len;
+//   this->tx_ptr_ = &this->tx_buffer_[0];
 
-  this->tx_fragment_started_ = false;
-  this->tx_sequence_counter_ = 0;
-}
+//   this->tx_fragment_started_ = false;
+//   this->tx_sequence_counter_ = 0;
+// }
 
 void DlmsCosemBleComponent::prepare_and_send_dlms_buffers() {
   auto make = [this]() {
@@ -572,24 +621,24 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_aarq() {
   this->send_dlms_req_and_next(make, parse, FsmState::ASSOCIATION_RCV);
 }
 
-void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *obis, int type) {
-  auto ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
-  if (ret != DLMS_ERROR_CODE_OK) {
-    ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
-    this->set_state_(FsmState::DATA_ENQ);
-    return;
-  }
+// void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *obis, int type) {
+//   auto ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
+//   if (ret != DLMS_ERROR_CODE_OK) {
+//     ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
+//     this->set_next_state_(FsmState::DATA_ENQ);
+//     return;
+//   }
 
-  auto make = [this]() {
-    return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-                   &this->buffers_.out_msg);
-  };
-  auto parse = [this]() {
-    return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-                          &this->buffers_.reply.dataValue);
-  };
-  this->send_dlms_req_and_next(make, parse, FsmState::DATA_ENQ, false, false);
-}
+//   auto make = [this]() {
+//     return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+//                    &this->buffers_.out_msg);
+//   };
+//   auto parse = [this]() {
+//     return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+//                           &this->buffers_.reply.dataValue);
+//   };
+//   this->send_dlms_req_and_next(make, parse, FsmState::DATA_ENQ, false, false);
+// }
 
 void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis, int type, bool reg_init) {
   int ret = DLMS_ERROR_CODE_OK;
@@ -598,7 +647,7 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis,
   }
   if (ret != DLMS_ERROR_CODE_OK) {
     ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
-    this->set_state_(FsmState::DATA_NEXT);
+    this->set_next_state_(FsmState::DATA_NEXT);
     return;
   }
 
@@ -625,8 +674,8 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_disconnect() {
   this->send_dlms_req_and_next(make, parse, FsmState::PUBLISH);
 }
 
-void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsResponseParser parser, State next_state,
-                                                   bool mission_critical, bool clear_buffer) {
+void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsResponseParser parser,
+                                                   FsmState next_state, bool mission_critical, bool clear_buffer) {
   dlms_reading_state_.maker_fn = maker;
   dlms_reading_state_.parser_fn = parser;
   dlms_reading_state_.next_state = next_state;
@@ -642,7 +691,7 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
     ret = maker();
     if (ret != DLMS_ERROR_CODE_OK) {
       ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'", ret, dlms_error_to_string(ret));
-      this->set_state_(FsmState::IDLE);
+      this->set_next_state_(FsmState::IDLE);
       return;
     }
   }
@@ -658,35 +707,105 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
 
   received_complete_reply_ = false;
 
-  set_state_(FsmState::COMMS_TX);
+  this->rx_len_ = 0;
+
+  this->ble_flags_.tx_error = false;
+  this->ble_flags_.rx_reply = false;
+
+  this->set_next_state_(FsmState::COMMS_TX);
 }
 
-uint8_t DlmsCosemBleComponent::get_values_from_brackets_(char *line, ValueRefsArray &vals) {
-  // line = "VOLTA(100.1)VOLTA(200.1)VOLTA(300.1)VOLTA(400.1)"
-  vals.fill(empty_str);
+int DlmsCosemBleComponent::set_sensor_scale_and_unit(DlmsCosemBleSensor *sensor) {
+  ESP_LOGD(TAG, "set_sensor_scale_and_unit");
+  if (!buffers_.reply.complete)
+    return DLMS_ERROR_CODE_FALSE;
+  auto vt = buffers_.reply.dataType;
+  ESP_LOGD(TAG, "DLMS_DATA_TYPE: %s (%d)", dlms_data_type_to_string(vt), vt);
+  if (vt != 0) {
+    return DLMS_ERROR_CODE_FALSE;
+  }
 
-  uint8_t idx = 0;
-  bool got_param_name{false};
-  char *p = line;
-  while (*p && idx < VAL_NUM) {
-    if (*p == '(') {
-      if (!got_param_name) {
-        got_param_name = true;
-        *p = '\0';  // null-terminate param name
-      }
-      char *start = p + 1;
-      char *end = strchr(start, ')');
-      if (end) {
-        *end = '\0';  // null-terminate value
-        if (idx < VAL_NUM) {
-          vals[idx++] = start;
+  auto scal = this->buffers_.gx_register.scaler;
+  auto unit = this->buffers_.gx_register.unit;
+  auto unit_s = obj_getUnitAsString(unit);
+  sensor->set_scale_and_unit(scal, unit, unit_s);
+
+  return DLMS_ERROR_CODE_OK;
+}
+
+int DlmsCosemBleComponent::set_sensor_value(DlmsCosemBleSensorBase *sensor, const char *obis) {
+  if (!buffers_.reply.complete || !sensor->shall_we_publish()) {
+    return this->dlms_reading_state_.last_error;
+  }
+
+  auto vt = buffers_.reply.dataType;
+  auto object_class = sensor->get_obis_class();
+  ESP_LOGD(TAG, "Class: %d, OBIS code: %s, DLMS_DATA_TYPE: %s (%d)", object_class, obis, dlms_data_type_to_string(vt),
+           vt);
+
+  //      if (cosem_rr_.result().has_value()) {
+  if (this->dlms_reading_state_.last_error == DLMS_ERROR_CODE_OK) {
+    // result is okay, value shall be there
+
+#ifdef USE_SENSOR
+    if (sensor->get_type() == SensorType::SENSOR) {
+      if ((object_class == DLMS_OBJECT_TYPE_DATA) || (object_class == DLMS_OBJECT_TYPE_REGISTER) ||
+          (object_class == DLMS_OBJECT_TYPE_EXTENDED_REGISTER)) {
+        auto var = &this->buffers_.gx_register.value;
+        auto scale = static_cast<DlmsCosemBleSensor *>(sensor)->get_scale();
+        auto unit = static_cast<DlmsCosemBleSensor *>(sensor)->get_unit();
+        if (vt == DLMS_DATA_TYPE_FLOAT32 || vt == DLMS_DATA_TYPE_FLOAT64) {
+          float val = var_toDouble(var);
+          ESP_LOGD(TAG, "OBIS code: %s, Value: %f, Scale: %f, Unit: %s", obis, val, scale, unit);
+          static_cast<DlmsCosemBleSensor *>(sensor)->set_value(val);
+        } else {
+          int val = var_toInteger(var);
+          ESP_LOGD(TAG, "OBIS code: %s, Value: %d, Scale: %f, Unit: %s", obis, val, scale, unit);
+          static_cast<DlmsCosemBleSensor *>(sensor)->set_value(val);
         }
-        p = end;
+      } else {
+        ESP_LOGW(TAG, "Wrong OBIS class. Regular numberic sensors can only "
+                      "handle Data (class 1), Registers (class = 3) and Extended Registers (class = 4)");
       }
     }
-    p++;
+#endif  // USE_SENSOR
+
+#ifdef USE_TEXT_SENSOR
+    if (sensor->get_type() == SensorType::TEXT_SENSOR) {
+      auto var = &this->buffers_.gx_register.value;
+      if (var && var->byteArr && var->byteArr->size > 0) {
+        auto arr = var->byteArr;
+
+        ESP_LOGV(TAG, "data size=%d", arr->size);
+
+        bb_setInt8(arr, 0);     // add null-termination
+        if (arr->size > 128) {  // clip the string
+          ESP_LOGW(TAG, "String is too long %d, clipping to 128 bytes", arr->size);
+          arr->data[127] = '\0';
+        }
+        ESP_LOGV(TAG, "DATA: %s", format_hex_pretty(arr->data, arr->size).c_str());
+
+        if ((object_class == DLMS_OBJECT_TYPE_DATA) || (object_class == DLMS_OBJECT_TYPE_REGISTER) ||
+            (object_class == DLMS_OBJECT_TYPE_EXTENDED_REGISTER)) {
+          if (vt == DLMS_DATA_TYPE_DATETIME) {
+            auto data_as_string = dlms_data_as_string(vt, arr->data, arr->size);
+            static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(data_as_string.c_str(),
+                                                                     this->cp1251_conversion_required_);
+          } else {
+            static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(reinterpret_cast<const char *>(arr->data),
+                                                                     this->cp1251_conversion_required_);
+          }
+        } else {
+          ESP_LOGW(TAG, "Wrong OBIS class. We can only handle Data (class 1), Registers (class = 3) and Extended "
+                        "Registers (class = 4)");
+        }
+      }
+    }
+#endif
+  } else {
+    ESP_LOGD(TAG, "OBIS code: %s, result != DLMS_ERROR_CODE_OK = %d", obis, this->dlms_reading_state_.last_error);
   }
-  return idx;  // at least one bracket found
+  return this->dlms_reading_state_.last_error;
 }
 
 bool char2float(const char *str, float &value) {
@@ -695,98 +814,24 @@ bool char2float(const char *str, float &value) {
   return *end == '\0' || *end == '*' || *end == '#';
 }
 
-// Get N-th value from comma-separated string, 1-based index
-// line = "20.08.24,0.45991"
-// get_nth_value_from_csv_(line, 1) -> "20.08.24"
-// get_nth_value_from_csv_(line, 2) -> "0.45991"
-char *DlmsCosemBleComponent::get_nth_value_from_csv_(char *line, uint8_t idx) {
-  if (idx == 0) {
-    return line;
-  }
-  char *ptr;
-  ptr = strtok(line, ",");
-  while (ptr != nullptr) {
-    if (idx-- == 1)
-      return ptr;
-    ptr = strtok(nullptr, ",");
-  }
-  return nullptr;
-}
-
-bool DlmsCosemBleComponent::set_sensor_value_(DlmsCosemBleSensorBase *sensor, ValueRefsArray &vals) {
-  auto type = sensor->get_type();
-  bool ret = true;
-
-  uint8_t idx = sensor->get_index() - 1;
-  if (idx >= VAL_NUM) {
-    ESP_LOGE(TAG, "Invalid sensor index %u", idx);
-    return false;
-  }
-  char str_buffer[128] = {'\0'};
-  strncpy(str_buffer, vals[idx], 128);
-
-  char *str = str_buffer;
-  uint8_t sub_idx = sensor->get_sub_index();
-  if (sub_idx == 0) {
-    ESP_LOGV(TAG, "Setting value for sensor '%s', idx = %d to '%s'", sensor->get_request().c_str(), idx + 1, str);
-  } else {
-    ESP_LOGV(TAG, "Extracting value for sensor '%s', idx = %d, sub_idx = %d from '%s'", sensor->get_request().c_str(),
-             idx + 1, sub_idx, str);
-    str = this->get_nth_value_from_csv_(str, sub_idx);
-    if (str == nullptr) {
-      ESP_LOGE(TAG,
-               "Cannot extract sensor value by sub-index %d. Is data "
-               "comma-separated? Also note that sub-index starts "
-               "from 1",
-               sub_idx);
-      str_buffer[0] = '\0';
-      str = str_buffer;
-    }
-    ESP_LOGV(TAG, "Setting value using sub-index = %d, extracted sensor value is '%s'", sub_idx, str);
-  }
-
-#ifdef USE_SENSOR
-  if (type == SensorType::SENSOR) {
-    float f = 0;
-    // todo: for non-DLMS/COSEM meters... value can be "100.0" or "100.0*kWh" or
-    // "100.0#A"
-    ret = str && str[0] && char2float(str, f);
-    if (ret) {
-      static_cast<DlmsCosemBleSensor *>(sensor)->set_value(f);
-    } else {
-      ESP_LOGE(TAG,
-               "Cannot convert incoming data to a number. Consider using a "
-               "text sensor. Invalid data: '%s'",
-               str);
-    }
-  }
-#endif
-#ifdef USE_TEXT_SENSOR
-  if (type == SensorType::TEXT_SENSOR) {
-    static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(str);
-  }
-#endif
-  return ret;
-}
-
-const char *ble_client_state_to_string(espbt::ClientState state) {
+const LogString *ble_client_state_to_string(espbt::ClientState state) {
   switch (state) {
     case espbt::ClientState::INIT:
-      return "INIT";
+      return LOG_STR("INIT");
     case espbt::ClientState::DISCONNECTING:
-      return "DISCONNECTING";
+      return LOG_STR("DISCONNECTING");
     case espbt::ClientState::IDLE:
-      return "IDLE";
+      return LOG_STR("IDLE");
     case espbt::ClientState::DISCOVERED:
-      return "DISCOVERED";
+      return LOG_STR("DISCOVERED");
     case espbt::ClientState::CONNECTING:
-      return "CONNECTING";
+      return LOG_STR("CONNECTING");
     case espbt::ClientState::CONNECTED:
-      return "CONNECTED";
+      return LOG_STR("CONNECTED");
     case espbt::ClientState::ESTABLISHED:
-      return "ESTABLISHED";
+      return LOG_STR("ESTABLISHED");
     default:
-      return "UNKNOWN";
+      return LOG_STR("UNKNOWN");
   }
 }
 
@@ -807,8 +852,8 @@ void DlmsCosemBleComponent::internal_safeguard_() {
   ESP_LOGV(TAG,
            "Internal safeguard. FSM state is %s, My BLE state is %s, Parent "
            "BLE state is %s. Error states count: %u, BLE connecting states count: %u",
-           this->state_to_string_(this->state_), ble_client_state_to_string(my_ble_state),
-           ble_client_state_to_string(parent_ble_state), error_states, ble_connectings);
+           LOG_STR_ARG(this->state_to_string(this->state_)), LOG_STR_ARG(ble_client_state_to_string(my_ble_state)),
+           LOG_STR_ARG(ble_client_state_to_string(parent_ble_state)), error_states, ble_connectings);
 
   if (error_states > SAFEGUARD_ERROR_LIMIT || ble_connectings > SAFEGUARD_ERROR_LIMIT) {
     ESP_LOGE(TAG, "Too many errors or BLE connecting states. Rebooting.");
@@ -844,13 +889,12 @@ void DlmsCosemBleComponent::reset_error() {
 void DlmsCosemBleComponent::try_connect() {
   if (this->state_ != FsmState::IDLE) {
     ESP_LOGW(TAG, "Not in IDLE state, can't start data collection. Current state is %s",
-             this->state_to_string_(this->state_));
+             LOG_STR_ARG(this->state_to_string(this->state_)));
     return;
   }
   ESP_LOGI(TAG, "Initiating data collection from DLMS/COSEM BLE device");
 
-  SET_STATE(FsmState::STARTING);
-
+  this->ble_flags_.raw = 0;
   this->ch_handle_tx_ = 0;
   this->ch_handle_cccd_ = 0;
   this->ch_handle_rx_ = 0;
@@ -863,10 +907,11 @@ void DlmsCosemBleComponent::try_connect() {
   this->rx_len_ = 0;
   this->rx_fragments_expected_ = 0;
   this->rx_current_fragment_ = 0;
-  this->flags_.raw = 0;
 
   this->loop_state_.request_iter = this->sensors_.begin();
   this->loop_state_.sensor_iter = this->sensors_.begin();
+
+  SET_STATE(FsmState::BLE_STARTING);
 
   ESP_LOGV(TAG, "Setting desired MTU to %d", DESIRED_MTU);
   esp_ble_gatt_set_local_mtu(DESIRED_MTU);
@@ -896,13 +941,13 @@ void DlmsCosemBleComponent::try_connect() {
 
 void DlmsCosemBleComponent::send_next_fragment_() {
   this->run_in_ble_thread_([this]() {
-    // this->flags_.tx_error = ;
+    // this->ble_flags_.tx_error = ;
     this->ble_send_next_fragment_();
   });
 }
 
 void DlmsCosemBleComponent::ble_set_error_() {
-  this->parent_->run_later([this]() { this->flags_.tx_error = true; });
+  this->parent_->run_later([this]() { this->ble_flags_.tx_error = true; });
 }
 
 bool DlmsCosemBleComponent::ble_discover_characteristics_() {
@@ -1026,7 +1071,7 @@ void DlmsCosemBleComponent::ble_initiate_fragment_reads_(uint8_t fragments_to_re
 
 void DlmsCosemBleComponent::ble_request_next_fragment_() {
   // Fragmented read path not used for this protocol; notifications carry the full payload.
-  this->flags_.rx_reply = true;
+  this->ble_flags_.rx_reply = true;
   if (this->rx_len_ == 0) {
     return;
   }
@@ -1125,7 +1170,7 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
                 param->write.status);
 
       if (param->write.status == ESP_GATT_OK) {
-        this->flags_.notifications_enabled = true;
+        this->ble_flags_.notifications_enabled = true;
       } else {
         ESP_LOGW(TAG, "Failed to enable notifications: %d", param->write.status);
         SET_STATE(FsmState::ERROR);
@@ -1138,7 +1183,6 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
         break;
 
       ESP_LOGV(TAG, "Notification received (handle = 0x%04X, )", param->notify.handle, param->notify.value_len);
-      this->rx_fragments_expected_ = param->notify.value[0];
 
       if (!param->notify.is_notify)
         break;
@@ -1148,16 +1192,17 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
         break;
       }
 
-      this->rx_len_ = param->notify.value_len;
-      if (this->rx_len_ > RX_BUFFER_SIZE)
-        this->rx_len_ = RX_BUFFER_SIZE;
-      memcpy(this->rx_buffer_, param->notify.value, this->rx_len_);
-      for (size_t i = 0; i < this->rx_len_; i++) {
-        this->rx_buffer_[i] &= 0x7F;
-      }
-      ESP_LOGV(TAG, "RX: %s", format_frame_pretty(this->rx_buffer_, this->rx_len_).c_str());
-      ESP_LOGVV(TAG, "RX: %s", format_hex_pretty(this->rx_buffer_, this->rx_len_).c_str());
-      this->flags_.rx_reply = true;
+      // if (this->rx_len_ > RX_BUFFER_SIZE)
+      //   this->rx_len_ = RX_BUFFER_SIZE;
+      this->buffers_.check_and_grow_input(param->notify.value_len);
+
+      auto start_pos = &this->buffers_.in.data[this->buffers_.in.size];
+      memcpy(start_pos, param->notify.value, param->notify.value_len);
+      this->buffers_.in.size += param->notify.value_len;
+
+      ESP_LOGV(TAG, "RX: %s", format_frame_pretty(start_pos, param->notify.value_len).c_str());
+      ESP_LOGVV(TAG, "RX: %s", format_hex_pretty(start_pos, param->notify.value_len).c_str());
+      this->ble_flags_.rx_reply = true;
       break;
     }
 
@@ -1195,7 +1240,7 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
         break;
       }
-      this->flags_.pin_code_was_requested = true;
+      this->ble_flags_.pin_code_was_requested = true;
       ESP_LOGV(TAG, "Supplying PIN %06u", this->passkey_);
       esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
     } break;
@@ -1218,8 +1263,8 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
 
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGVV(TAG, "Pairing completed successfully. Did we tell PIN to device ? %s ***",
-                  this->flags_.pin_code_was_requested ? "YES" : "NO");
-        this->flags_.auth_completed = true;
+                  this->ble_flags_.pin_code_was_requested ? "YES" : "NO");
+        this->ble_flags_.auth_completed = true;
       } else {
         ESP_LOGE(TAG, "*** Pairing FAILED, reason=%d ***", param->ble_security.auth_cmpl.fail_reason);
       }
@@ -1265,54 +1310,80 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
     ERROR,
     DISCONNECTED
 */
-const char *DlmsCosemBleComponent::state_to_string_(FsmState state) const {
+const LogString *DlmsCosemBleComponent::state_to_string(FsmState state) const {
   switch (state) {
     case FsmState::NOT_INITIALIZED:
-      return "NOT_INITIALIZED";
+      return LOG_STR("NOT_INITIALIZED");
     case FsmState::IDLE:
-      return "IDLE";
-    case FsmState::STARTING:
-      return "STARTING";
+      return LOG_STR("IDLE");
+    case FsmState::BLE_STARTING:
+      return LOG_STR("BLE_STARTING");
     case FsmState::COMMS_TX:
-      return "COMMS_TX";
+      return LOG_STR("COMMS_TX");
     case FsmState::COMMS_RX:
-      return "COMMS_RX";
+      return LOG_STR("COMMS_RX");
     case FsmState::MISSION_FAILED:
-      return "MISSION_FAILED";
+      return LOG_STR("MISSION_FAILED");
     case FsmState::BUFFERS_REQ:
-      return "BUFFERS_REQ";
+      return LOG_STR("BUFFERS_REQ");
     case FsmState::BUFFERS_RCV:
-      return "BUFFERS_RCV";
+      return LOG_STR("BUFFERS_RCV");
     case FsmState::ASSOCIATION_REQ:
-      return "ASSOCIATION_REQ";
+      return LOG_STR("ASSOCIATION_REQ");
     case FsmState::ASSOCIATION_RCV:
-      return "ASSOCIATION_RCV";
+      return LOG_STR("ASSOCIATION_RCV");
+    case FsmState::DATA_ENQ:
+      return LOG_STR("DATA_ENQ");
     case FsmState::DATA_RECV:
-      return "DATA_RECV";
+      return LOG_STR("DATA_RECV");
     case FsmState::DATA_NEXT:
-      return "DATA_NEXT";
-    case FsmState::PREPARING_COMMAND:
-      return "PREPARING_COMMAND";
+      return LOG_STR("DATA_NEXT");
+
     case FsmState::SENDING_COMMAND:
-      return "SENDING_COMMAND";
+      return LOG_STR("SENDING_COMMAND");
     case FsmState::READING_RESPONSE:
-      return "READING_RESPONSE";
+      return LOG_STR("READING_RESPONSE");
     case FsmState::GOT_RESPONSE:
-      return "GOT_RESPONSE";
+      return LOG_STR("GOT_RESPONSE");
     case FsmState::PUBLISH:
-      return "PUBLISH";
+      return LOG_STR("PUBLISH");
     case FsmState::ERROR:
-      return "ERROR";
+      return LOG_STR("ERROR");
     case FsmState::DISCONNECTED:
-      return "DISCONNECTED";
+      return LOG_STR("DISCONNECTED");
     default:
-      return "UNKNOWN";
+      return LOG_STR("UNKNOWN");
   }
 }
 
-void DlmsCosemBleComponent::set_state_(FsmState state) {
-  ESP_LOGV(TAG, "State change: %s -> %s", state_to_string_(this->state_), state_to_string_(state));
+void DlmsCosemBleComponent::set_next_state_(FsmState state) {
+  ESP_LOGV(TAG, "State change: %s -> %s", LOG_STR_ARG(this->state_to_string(this->state_)),
+           LOG_STR_ARG(this->state_to_string(state)));
   this->state_ = state;
+}
+
+void DlmsCosemBleComponent::set_next_state_delayed_(uint32_t ms, FsmState next_state) {
+  if (ms == 0) {
+    set_next_state_(next_state);
+  } else {
+    ESP_LOGV(TAG, "Short delay for %u ms", ms);
+    set_next_state_(FsmState::WAIT);
+    wait_.start_time = millis();
+    wait_.delay_ms = ms;
+    wait_.next_state = next_state;
+  }
+}
+
+void DlmsCosemBleComponent::log_state_(FsmState *next_state) {
+  if (this->state_ != this->last_reported_state_) {
+    if (next_state == nullptr) {
+      ESP_LOGV(TAG, "State::%s", LOG_STR_ARG(state_to_string(this->state_)));
+    } else {
+      ESP_LOGV(TAG, "State::%s -> %s", LOG_STR_ARG(state_to_string(this->state_)),
+               LOG_STR_ARG(state_to_string(*next_state)));
+    }
+    this->last_reported_state_ = this->state_;
+  }
 }
 
 }  // namespace esphome::dlms_cosem_ble

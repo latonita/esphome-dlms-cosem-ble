@@ -25,6 +25,8 @@ namespace espbt = esphome::esp32_ble_tracker;
 namespace esphome {
 namespace dlms_cosem_ble {
 
+static const size_t DEFAULT_IN_BUF_SIZE = 256;
+
 const uint8_t VAL_NUM = 12;
 using ValueRefsArray = ::std::array<char *, VAL_NUM>;
 using SensorMap = ::std::multimap<::std::string, DlmsCosemBleSensorBase *>;
@@ -81,19 +83,27 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   enum class FsmState : uint8_t {
     NOT_INITIALIZED = 0,
     IDLE,
-    STARTING,
+    BLE_STARTING,
+    WAIT,
 
     COMMS_TX,
     COMMS_RX,
     MISSION_FAILED,
+
+    OPEN_SESSION,
     BUFFERS_REQ,
     BUFFERS_RCV,
     ASSOCIATION_REQ,
     ASSOCIATION_RCV,
+    DATA_ENQ_UNIT,
+    DATA_ENQ,
     DATA_RECV,
     DATA_NEXT,
 
-    PREPARING_COMMAND,
+    SESSION_RELEASE,
+    DISCONNECT_REQ,
+
+    //    PREPARING_COMMAND,
     SENDING_COMMAND,
     READING_RESPONSE,
     GOT_RESPONSE,
@@ -102,8 +112,15 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
     DISCONNECTED
   };
   FsmState state_{FsmState::NOT_INITIALIZED};
-  const char *state_to_string_(FsmState state) const;
-  void set_state_(FsmState state);
+  FsmState last_reported_state_{FsmState::NOT_INITIALIZED};
+
+  const LogString *state_to_string(FsmState state) const;
+  void log_state_(FsmState *next_state = nullptr);
+
+//  const char *state_to_string_(FsmState state) const;
+  void set_next_state_(FsmState state);
+  void set_next_state_delayed_(uint32_t delay_ms, FsmState next_state);
+  
   
   //  void prepare_request_frame_(const ::std::string &request);
   void send_next_fragment_();
@@ -136,7 +153,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
       bool tx_error : 1;
       bool rx_reply : 1;
     };
-  } flags_{0};
+  } ble_flags_{0};
 
   // service, write char, read char
 
@@ -150,7 +167,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   uint16_t ch_handle_cccd_{0};
   uint16_t ch_handle_rx_{0};
 
-  uint8_t tx_buffer_[TX_BUFFER_SIZE];
+  // uint8_t tx_buffer_[TX_BUFFER_SIZE];
   //  uint8_t *tx_ptr_{nullptr};
   //  uint8_t tx_data_remaining_{0};
   //  uint8_t tx_packet_size_{19};
@@ -165,13 +182,16 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   int8_t rssi_{0};
   uint32_t passkey_{0};
 
-
   sensor::Sensor *signal_strength_{nullptr};
-
   void internal_safeguard_();
 
-  char *get_nth_value_from_csv_(char *line, uint8_t idx);
-  uint8_t get_values_from_brackets_(char *line, ValueRefsArray &vals);
+  // end of BLE part
+
+  //
+
+  // char *get_nth_value_from_csv_(char *line, uint8_t idx);
+  // uint8_t get_values_from_brackets_(char *line, ValueRefsArray &vals);
+  // void prepare_request_frame_(const std::string &request);
 
   // DLMS/COSEM functions
   void prepare_and_send_dlms_buffers();
@@ -199,8 +219,9 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   void handle_disconnect_req_();
 
   void handle_publish_();
-
+  int set_sensor_scale_and_unit(DlmsCosemBleSensor *sensor);
   int set_sensor_value(DlmsCosemBleSensorBase *sensor, const char *obis);
+
   struct {
     ReadFunction read_fn;
     FsmState next_state;
@@ -257,6 +278,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   bool auth_required_{false};
   std::string password_{""};
   uint32_t receive_timeout_ms_{2500};
+  uint32_t delay_between_requests_ms_{0};
   struct {
     uint32_t start_time{0};
     uint32_t delay_ms{0};
@@ -278,8 +300,20 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   bool check_wait_timeout_() { return millis() - wait_.start_time >= wait_.delay_ms; }
   bool check_rx_timeout_() { return millis() - this->last_rx_time_ >= receive_timeout_ms_; }
 
-  const LogString *state_to_string(FsmState state);
-  void log_state_(FsmState *next_state = nullptr);
+  void abort_mission_();
+
+  struct Stats {
+    uint32_t connections_tried_{0};
+    uint32_t crc_errors_{0};
+    uint32_t crc_errors_recovered_{0};
+    uint32_t invalid_frames_{0};
+    uint8_t failures_{0};
+
+    float crc_errors_per_session() const { return (float) crc_errors_ / connections_tried_; }
+  } stats_;
+  void stats_dump();
+  bool has_error{true};
+
 };
 
 }  // namespace dlms_cosem_ble

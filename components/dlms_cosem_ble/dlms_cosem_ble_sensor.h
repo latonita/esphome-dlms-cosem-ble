@@ -62,7 +62,7 @@ class DlmsCosemBleSensorBase {
 };
 
 #ifdef USE_SENSOR
-class DlmsCosemSensor : public DlmsCosemBleSensorBase, public sensor::Sensor {
+class DlmsCosemBleSensor : public DlmsCosemBleSensorBase, public sensor::Sensor {
  public:
   SensorType get_type() const override { return SENSOR; }
   const StringRef &get_sensor_name() { return this->get_name(); }
@@ -106,7 +106,7 @@ class DlmsCosemSensor : public DlmsCosemBleSensorBase, public sensor::Sensor {
 #endif  // USE_SENSOR
 
 #ifdef USE_TEXT_SENSOR
-class DlmsCosemTextSensor : public DlmsCosemBleSensorBase, public text_sensor::TextSensor {
+class DlmsCosemBleTextSensor : public DlmsCosemBleSensorBase, public text_sensor::TextSensor {
  public:
   SensorType get_type() const override { return TEXT_SENSOR; }
   const StringRef &get_sensor_name() { return this->get_name(); }
