@@ -121,11 +121,12 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   const LogString *state_to_string(FsmState state) const;
   void log_state_(FsmState *next_state = nullptr);
 
-  //  const char *state_to_string_(FsmState state) const;
   void set_next_state_(FsmState state);
   void set_next_state_delayed_(uint32_t delay_ms, FsmState next_state);
 
-  //  void prepare_request_frame_(const ::std::string &request);
+  //
+  // BLE related functions
+  // 
   void send_next_ble_fragment_();
 
   // BLE send/receive
@@ -174,18 +175,6 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   uint16_t ch_handle_cccd_{0};
   uint16_t ch_handle_rx_{0};
 
-  // uint8_t tx_buffer_[TX_BUFFER_SIZE];
-  //  uint8_t *tx_ptr_{nullptr};
-  //  uint8_t tx_data_remaining_{0};
-  //  uint8_t tx_packet_size_{19};
-  //  uint8_t tx_sequence_counter_{0};
-  //  bool tx_fragment_started_{false};
-
-  uint8_t rx_buffer_[RX_BUFFER_SIZE];
-  size_t rx_len_{0};
-  uint8_t rx_fragments_expected_{0};
-  uint8_t rx_current_fragment_{0};
-
   int8_t rssi_{0};
   uint32_t passkey_{0};
 
@@ -194,18 +183,13 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
 
   // end of BLE part
 
-  //
-
-  // char *get_nth_value_from_csv_(char *line, uint8_t idx);
-  // uint8_t get_values_from_brackets_(char *line, ValueRefsArray &vals);
-  // void prepare_request_frame_(const std::string &request);
 
   // DLMS/COSEM functions
   void prepare_and_send_dlms_buffers();
   void prepare_and_send_dlms_aarq();
   void prepare_and_send_dlms_auth();
-  void prepare_and_send_dlms_data_unit_request(const char *obis, int type);
-  void prepare_and_send_dlms_data_request(const char *obis, int type, bool reg_init = true);
+  void prepare_and_send_dlms_data_unit_request(const char *obis, int obis_class);
+  void prepare_and_send_dlms_data_request(const char *obis, int obis_class, bool reg_init = true);
   void prepare_and_send_dlms_release();
   void prepare_and_send_dlms_disconnect();
   void send_dlms_req_and_next(DlmsRequestMaker maker, DlmsResponseParser parser, FsmState next_state,
@@ -225,8 +209,8 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   void handle_data_next_();
   void handle_session_release_();
   void handle_disconnect_req_();
-
   void handle_publish_();
+
   int set_sensor_scale_and_unit(DlmsCosemBleSensor *sensor);
   int set_sensor_value(DlmsCosemBleSensorBase *sensor, const char *obis);
 
@@ -323,7 +307,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
 
     float crc_errors_per_session() const { return (float) crc_errors_ / connections_tried_; }
   } stats_;
-  void stats_dump();
+  void stats_dump_();
   bool has_error{true};
 };
 
