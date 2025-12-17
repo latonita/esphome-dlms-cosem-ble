@@ -676,8 +676,7 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
     ret = maker();
     if (ret != DLMS_ERROR_CODE_OK) {
       ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'. Skipping to next", ret, dlms_error_to_string(ret));
-      //this->set_next_state_(FsmState::DATA_NEXT);
-      this->set_next_state_(reading_state_.next_state);
+      this->set_next_state_(FsmState::DATA_NEXT);
       return;
     }
   }
