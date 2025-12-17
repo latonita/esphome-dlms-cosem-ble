@@ -13,6 +13,7 @@ from esphome.const import (
     CONF_SERVICE_UUID,
     CONF_SIGNAL_STRENGTH,
     CONF_TIME_ID,
+    CONF_RECEIVE_TIMEOUT,
     CONF_UPDATE_INTERVAL,
     ENTITY_CATEGORY_DIAGNOSTIC,
     DEVICE_CLASS_SIGNAL_STRENGTH,
@@ -30,6 +31,7 @@ MULTI_CONF = True
 
 DEFAULTS_MAX_SENSOR_INDEX = 12
 DEFAULTS_UPDATE_INTERVAL = "60s"
+DEFAULTS_RECEIVE_TIMEOUT = "2000ms"
 
 CONF_DLMS_COSEM_BLE_ID = "dlms_cosem_ble_id"
 CONF_OBIS_CODE = "obis_code"
@@ -143,6 +145,9 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_AUTH, default=False): cv.boolean,
             cv.Optional(CONF_PASSWORD, default=""): cv.string,
+            cv.Optional(
+                CONF_RECEIVE_TIMEOUT, default=DEFAULTS_RECEIVE_TIMEOUT
+            ): cv.positive_time_period_milliseconds,
         }
     )
     .extend(ble_client.BLE_CLIENT_SCHEMA)
@@ -183,6 +188,7 @@ async def to_code(config):
     cg.add(var.set_client_address(config[CONF_CLIENT_ADDRESS]))
     cg.add(var.set_auth_required(config[CONF_AUTH]))
     cg.add(var.set_password(config[CONF_PASSWORD]))
+    cg.add(var.set_receive_timeout_ms(config[CONF_RECEIVE_TIMEOUT]))
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
 

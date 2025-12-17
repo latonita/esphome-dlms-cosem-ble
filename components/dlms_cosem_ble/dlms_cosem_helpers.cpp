@@ -302,6 +302,8 @@ const char *dlms_error_to_string(int error) {
       return "DLMS_ERROR_CODE_UNDEFINED_OBJECT";
     case DLMS_ERROR_CODE_ACCESS_VIOLATED:
       return "DLMS_ERROR_CODE_ACCESS_VIOLATED";
+    case DLMS_ERROR_CODE_INVALID_PARAMETER:
+      return "DLMS_ERROR_CODE_INVALID_PARAMETER";
     default:
       return "";
   }

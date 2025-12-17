@@ -230,7 +230,7 @@ void DlmsCosemBleComponent::loop() {
 
     case FsmState::BLE_STARTING: {
       if (this->ble_flags_.notifications_enabled && this->ble_flags_.auth_completed) {
-        SET_STATE(FsmState::OPEN_SESSION);
+        this->set_next_state_(FsmState::OPEN_SESSION);
       }
     } break;
 
@@ -283,83 +283,6 @@ void DlmsCosemBleComponent::loop() {
       this->handle_data_next_();
     } break;
 
-      // case FsmState::PREPARING_COMMAND: {
-      //   // if (this->request_iter == this->sensors_.end()) {
-      //   //   SET_STATE(FsmState::PUBLISH);
-      //   //   this->parent_->disconnect();
-      //   //   break;
-      //   // }
-
-      //   // SET_STATE(FsmState::SENDING_COMMAND);
-
-      //   // this->rx_len_ = 0;
-
-      //   // this->ble_flags_.tx_error = false;
-      //   // this->ble_flags_.rx_reply = false;
-
-      //   // auto req = this->request_iter->first;
-      //   // this->prepare_request_frame_(req.c_str());
-      //   // ESP_LOGI(TAG, "Sending request %s (%u bytes payload)", req.c_str(), this->tx_data_remaining_);
-
-      // } break;
-
-      // case FsmState::SENDING_COMMAND: {
-      //   // if (this->ble_flags_.tx_error) {
-      //   //   ESP_LOGE(TAG, "Error sending data");
-      //   //   SET_STATE(FsmState::ERROR);
-      //   // } else if (this->tx_data_remaining_ == 0) {
-      //   //   SET_STATE(FsmState::READING_RESPONSE);
-      //   // }
-      // } break;
-
-      // case FsmState::READING_RESPONSE: {
-      //   if (this->ble_flags_.rx_reply) {
-      //     SET_STATE(FsmState::GOT_RESPONSE);
-      //   }
-      // } break;
-
-      //  case FsmState::GOT_RESPONSE: {
-      // do {
-      //   if (this->rx_len_ == 0)
-      //     break;
-
-      //   auto brackets_found = get_values_from_brackets_(in_param_ptr, vals);
-      //   if (!brackets_found)
-      //     break;
-
-      //   ESP_LOGD(TAG,
-      //            "Received name: '%s', values: %d, idx: 1(%s), 2(%s), 3(%s), "
-      //            "4(%s), 5(%s), 6(%s), 7(%s), 8(%s), 9(%s), "
-      //            "10(%s), 11(%s), 12(%s)",
-      //            in_param_ptr, brackets_found, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
-      //            vals[7], vals[8], vals[9], vals[10], vals[11]);
-
-      //   if (in_param_ptr[0] == '\0') {
-      //     if (vals[0][0] == 'E' && vals[0][1] == 'R' && vals[0][2] == 'R') {
-      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed. Error code %s", in_param_ptr, vals[0]);
-      //     } else {
-      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed.", in_param_ptr);
-      //     }
-      //     break;
-      //   }
-
-      //   auto req = this->request_iter->first;
-      //   if (this->request_iter->second->get_function() != in_param_ptr) {
-      //     ESP_LOGE(TAG, "Returned data name mismatch. Skipping frame");
-      //     break;
-      //   }
-
-      //   auto range = sensors_.equal_range(req);
-      //   for (auto it = range.first; it != range.second; ++it) {
-      //     if (!it->second->is_failed())
-      //       set_sensor_value_(it->second, vals);
-      //   }
-      // } while (0);
-
-      // this->request_iter = this->sensors_.upper_bound(this->request_iter->first);
-      // this->rx_len_ = 0;
-      // SET_STATE(FsmState::PREPARING_COMMAND);
-      //    } break;
     case FsmState::SESSION_RELEASE: {
       this->handle_session_release_();
     } break;
@@ -377,8 +300,8 @@ void DlmsCosemBleComponent::loop() {
 void DlmsCosemBleComponent::handle_comms_tx_() {
   this->log_state_();
 
-  if (this->ble_flags_.tx_error) {
-    ESP_LOGE(TAG, "TX error.");
+  if (this->check_rx_timeout_() || this->ble_flags_.tx_error) {
+    ESP_LOGE(TAG, this->ble_flags_.tx_error ? "TX error." : "TX timeout.");
     this->has_error = true;
     this->dlms_reading_state_.last_error = DLMS_ERROR_CODE_HARDWARE_FAULT;
     this->stats_.invalid_frames_ += reading_state_.err_invalid_frames;
@@ -440,9 +363,9 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
   // 3. if ret = 0 or ret = DLMS_ERROR_CODE_FALSE then stop
   // 4. check reply->complete. if it is 0 then continue reading, go to 1
   //
+
   // read hdlc frame
-  received_frame_size_ = buffers_.in.size;  // this->receive_frame_hdlc_();
-  // BLE - better check for full HDLC frame in the buffer?
+  received_frame_size_ = this->receive_frame_hdlc_();
 
   if (received_frame_size_ == 0) {
     // keep reading until proper frame is received
@@ -500,6 +423,7 @@ void DlmsCosemBleComponent::handle_open_session_() {
   this->log_state_();
   this->clear_rx_buffers_();
   this->loop_state_.request_iter = this->sensors_.begin();
+  this->update_last_rx_time_();
 
   this->set_next_state_(FsmState::BUFFERS_REQ);
 
@@ -655,6 +579,9 @@ size_t DlmsCosemBleComponent::receive_frame_hdlc_() {
   //   return ret;
   // };
   // return receive_frame_(frame_end_check_hdlc);
+
+
+  // it would be nice to check buffer contains full HDLC frame, if not - return 0 
   return buffers_.in.size;
 }
 
@@ -662,45 +589,7 @@ void DlmsCosemBleComponent::queue_dlms_messages_() {
   // this schedules sending from BLE thread
   this->send_next_ble_fragment_();
   this->update_last_rx_time_();
-
-  // // const int MAX_BYTES_IN_ONE_SHOT = 64;
-  // gxByteBuffer *buffer = buffers_.out_msg.data[buffers_.out_msg_index];
-
-  // int bytes_to_send = buffer->size - buffers_.out_msg_data_pos;
-  // // if (bytes_to_send > 0) {
-  // //   if (bytes_to_send > MAX_BYTES_IN_ONE_SHOT)
-  // //     bytes_to_send = MAX_BYTES_IN_ONE_SHOT;
-
-  // this->write_array(buffer->data + buffers_.out_msg_data_pos, bytes_to_send);
-
-  // //   ESP_LOGVV(TAG, "TX: %s", format_hex_pretty(buffer->data + buffers_.out_msg_data_pos, bytes_to_send).c_str());
-
-  // //   this->update_last_rx_time_();
-  // //   buffers_.out_msg_data_pos += bytes_to_send;
-  // // }
-  // // if (buffers_.out_msg_data_pos >= buffer->size) {
-  // //   buffers_.out_msg_index++;
-  // // }
 }
-
-// void DlmsCosemBleComponent::prepare_request_frame_(const std::string &request) {
-//   //////////////////////////////////////
-
-//   // Prepare the command frame
-//   size_t len = snprintf((char *) this->tx_buffer_, TX_BUFFER_SIZE, "/?!\x01R1\x02%s\x03", request.c_str());
-//   len++;  // include null terminator
-
-//   // Parity
-//   for (size_t i = 0; i < len; i++) {
-//     this->tx_buffer_[i] = apply_even_parity(this->tx_buffer_[i]);
-//   }
-
-//   this->tx_data_remaining_ = len;
-//   this->tx_ptr_ = &this->tx_buffer_[0];
-
-//   this->tx_fragment_started_ = false;
-//   this->tx_sequence_counter_ = 0;
-// }
 
 void DlmsCosemBleComponent::prepare_and_send_dlms_buffers() {
   auto make = [this]() {
@@ -786,8 +675,9 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
   if (maker != nullptr) {
     ret = maker();
     if (ret != DLMS_ERROR_CODE_OK) {
-      ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'", ret, dlms_error_to_string(ret));
-      this->set_next_state_(FsmState::IDLE);
+      ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'. Skipping to next", ret, dlms_error_to_string(ret));
+      //this->set_next_state_(FsmState::DATA_NEXT);
+      this->set_next_state_(reading_state_.next_state);
       return;
     }
   }
@@ -1246,8 +1136,10 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
 
       ESP_LOGV(TAG, "Notification received (handle = 0x%04X, )", param->notify.handle, param->notify.value_len);
 
-      if (!param->notify.is_notify)
+      if (!param->notify.is_notify) {
+        ESP_LOGW(TAG, "Indication received instead of notification, not supported");
         break;
+      }
 
       if (!param->notify.value || param->notify.value_len == 0) {
         ESP_LOGW(TAG, "Notification with empty payload received");
