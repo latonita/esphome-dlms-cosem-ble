@@ -71,6 +71,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
 
   void set_auth_required(bool auth) { this->auth_required_ = auth; };
   void set_password(const std::string &addr) { this->password_ = addr; };
+  void set_cp1251_conversion_required(bool required) { this->cp1251_conversion_required_ = required; }
 
   // Sensors
   void set_signal_strength(sensor::Sensor *signal_strength) { signal_strength_ = signal_strength; }
@@ -287,6 +288,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   std::string password_{""};
   uint32_t receive_timeout_ms_{2500};
   uint32_t delay_between_requests_ms_{0};
+  bool cp1251_conversion_required_{true};
   struct {
     uint32_t start_time{0};
     uint32_t delay_ms{0};

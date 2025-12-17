@@ -283,83 +283,6 @@ void DlmsCosemBleComponent::loop() {
       this->handle_data_next_();
     } break;
 
-      // case FsmState::PREPARING_COMMAND: {
-      //   // if (this->request_iter == this->sensors_.end()) {
-      //   //   SET_STATE(FsmState::PUBLISH);
-      //   //   this->parent_->disconnect();
-      //   //   break;
-      //   // }
-
-      //   // SET_STATE(FsmState::SENDING_COMMAND);
-
-      //   // this->rx_len_ = 0;
-
-      //   // this->ble_flags_.tx_error = false;
-      //   // this->ble_flags_.rx_reply = false;
-
-      //   // auto req = this->request_iter->first;
-      //   // this->prepare_request_frame_(req.c_str());
-      //   // ESP_LOGI(TAG, "Sending request %s (%u bytes payload)", req.c_str(), this->tx_data_remaining_);
-
-      // } break;
-
-      // case FsmState::SENDING_COMMAND: {
-      //   // if (this->ble_flags_.tx_error) {
-      //   //   ESP_LOGE(TAG, "Error sending data");
-      //   //   SET_STATE(FsmState::ERROR);
-      //   // } else if (this->tx_data_remaining_ == 0) {
-      //   //   SET_STATE(FsmState::READING_RESPONSE);
-      //   // }
-      // } break;
-
-      // case FsmState::READING_RESPONSE: {
-      //   if (this->ble_flags_.rx_reply) {
-      //     SET_STATE(FsmState::GOT_RESPONSE);
-      //   }
-      // } break;
-
-      //  case FsmState::GOT_RESPONSE: {
-      // do {
-      //   if (this->rx_len_ == 0)
-      //     break;
-
-      //   auto brackets_found = get_values_from_brackets_(in_param_ptr, vals);
-      //   if (!brackets_found)
-      //     break;
-
-      //   ESP_LOGD(TAG,
-      //            "Received name: '%s', values: %d, idx: 1(%s), 2(%s), 3(%s), "
-      //            "4(%s), 5(%s), 6(%s), 7(%s), 8(%s), 9(%s), "
-      //            "10(%s), 11(%s), 12(%s)",
-      //            in_param_ptr, brackets_found, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
-      //            vals[7], vals[8], vals[9], vals[10], vals[11]);
-
-      //   if (in_param_ptr[0] == '\0') {
-      //     if (vals[0][0] == 'E' && vals[0][1] == 'R' && vals[0][2] == 'R') {
-      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed. Error code %s", in_param_ptr, vals[0]);
-      //     } else {
-      //       ESP_LOGE(TAG, "Request '%s' either not supported or malformed.", in_param_ptr);
-      //     }
-      //     break;
-      //   }
-
-      //   auto req = this->request_iter->first;
-      //   if (this->request_iter->second->get_function() != in_param_ptr) {
-      //     ESP_LOGE(TAG, "Returned data name mismatch. Skipping frame");
-      //     break;
-      //   }
-
-      //   auto range = sensors_.equal_range(req);
-      //   for (auto it = range.first; it != range.second; ++it) {
-      //     if (!it->second->is_failed())
-      //       set_sensor_value_(it->second, vals);
-      //   }
-      // } while (0);
-
-      // this->request_iter = this->sensors_.upper_bound(this->request_iter->first);
-      // this->rx_len_ = 0;
-      // SET_STATE(FsmState::PREPARING_COMMAND);
-      //    } break;
     case FsmState::SESSION_RELEASE: {
       this->handle_session_release_();
     } break;
@@ -786,8 +709,8 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
   if (maker != nullptr) {
     ret = maker();
     if (ret != DLMS_ERROR_CODE_OK) {
-      ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'", ret, dlms_error_to_string(ret));
-      this->set_next_state_(FsmState::IDLE);
+      ESP_LOGE(TAG, "Error in DLSM request maker function %d '%s'. Skipping to next", ret, dlms_error_to_string(ret));
+      this->set_next_state_(FsmState::DATA_NEXT);
       return;
     }
   }
