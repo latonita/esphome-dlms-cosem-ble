@@ -365,15 +365,7 @@ void DlmsCosemBleComponent::loop() {
     } break;
 
     case FsmState::PUBLISH: {
-      // if (this->sensor_iter != this->sensors_.end()) {
-      //   this->sensor_iter->second->publish();
-      //   this->sensor_iter++;
-      // } else {
-      if (this->signal_strength_ != nullptr) {
-        this->signal_strength_->publish_state(this->rssi_);
-      }
-      SET_STATE(FsmState::IDLE);
-      //      }
+      this->handle_publish_();
     } break;
 
     case FsmState::ERROR:
@@ -624,6 +616,31 @@ void DlmsCosemBleComponent::handle_session_release_() {
   //  this->stats_.connections_successful_++;
   this->set_next_state_(FsmState::PUBLISH);
 }
+
+void DlmsCosemBleComponent::handle_publish_() {
+  this->log_state_();
+  ESP_LOGD(TAG, "Publishing data");
+  this->update_last_rx_time_();
+
+  if (this->loop_state_.sensor_iter != this->sensors_.end()) {
+    if (this->loop_state_.sensor_iter->second->shall_we_publish()) {
+      this->loop_state_.sensor_iter->second->publish();
+    }
+    this->loop_state_.sensor_iter++;
+  } else {
+//    this->stats_dump();
+    // if (this->crc_errors_per_session_sensor_ != nullptr) {
+    //   this->crc_errors_per_session_sensor_->publish_state(this->stats_.crc_errors_per_session());
+    // }
+    // this->report_failure(false);
+    if (this->signal_strength_ != nullptr) {
+      this->signal_strength_->publish_state(this->rssi_);
+    }
+    this->set_next_state_(FsmState::IDLE);
+    ESP_LOGD(TAG, "Total time: %u ms", millis() - this->loop_state_.session_started_ms);
+  }
+}
+
 
 void DlmsCosemBleComponent::clear_rx_buffers_() {
   memset(this->buffers_.in.data, 0, buffers_.in.capacity);
