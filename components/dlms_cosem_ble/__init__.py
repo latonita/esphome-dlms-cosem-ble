@@ -6,6 +6,7 @@ from esphome.components import ble_client, binary_sensor, time
 from esphome.components import sensor as esphome_sensor
 from esphome.const import (
     CONF_ID,
+    CONF_AUTH,
     CONF_NAME,
     CONF_PASSWORD,
     CONF_PIN,
@@ -31,8 +32,16 @@ DEFAULTS_MAX_SENSOR_INDEX = 12
 DEFAULTS_UPDATE_INTERVAL = "60s"
 
 CONF_DLMS_COSEM_BLE_ID = "dlms_cosem_ble_id"
-CONF_REQUEST = "request"
-CONF_SUB_INDEX = "sub_index"
+CONF_OBIS_CODE = "obis_code"
+CONF_CLIENT_ADDRESS = "client_address"
+CONF_SERVER_ADDRESS = "server_address"
+CONF_LOGICAL_DEVICE = "logical_device"
+CONF_PHYSICAL_DEVICE = "physical_device"
+CONF_ADDRESS_LENGTH = "address_length"
+CONF_DONT_PUBLISH = "dont_publish"
+CONF_CLASS = "class"
+CONF_CP1251 = "cp1251"
+
 
 CONF_READ_UUID = "read_uuid"
 CONF_WRITE_UUID = "write_uuid"
@@ -76,21 +85,30 @@ def bt_uuid_128(value):
         f"Bluetooth UUID must be in 128 bit '{bt_uuid128_format}' format"
     )
 
-def validate_request_format(value):
-    if not value.endswith(")"):
-        value += "()"
+def obis_code(value):
+    value = cv.string(value)
+    # examples of valid OBIS codes that should pass:
+    #   0.0.96.14.0.255
+    #   1-0:32.7.0.255
+    #   1-0:32.7.0*255
 
-    pattern = r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\(.*\)$"
-    if not re.match(pattern, value):
-        raise cv.Invalid(
-            "Invalid request format. Proper is 'REQUEST' or 'REQUEST()' or 'REQUEST(ARGS)'"
-        )
+    # output will always be in format x.x.x.x.x.x
 
-    if len(value) > 60:
-        raise cv.Invalid(
-            "Request length must be no longer than 60 characters including ()"
-        )
+    # So we just accept dots, dashes, colons, and asterisks as separators
+    match = re.match(r"^\d{1,3}[.\-:*]\d{1,3}[.\-:*]\d{1,3}[.\-:*]\d{1,3}[.\-:*]\d{1,3}[.\-:*]\d{1,3}$", value)
+    if match is None:
+        raise cv.Invalid(f"{value} is not a valid OBIS code. Use format A.B.C.D.E.F or A-B:C.D.E*F")
+    
+    # Normalize to dot-separated format
+    normalized = re.sub(r'[.\-:*]', '.', value)
+    return normalized
+
+
+def validate_meter_address(value):
+    if len(value) > 15:
+        raise cv.Invalid("Meter address length must be no longer than 15 characters")
     return value
+
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -111,10 +129,20 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Required(CONF_PIN): cv.int_range(min=0,max=999999),
-            cv.Optional(CONF_PASSWORD, default=""): cv.string,
             cv.Required(CONF_SERVICE_UUID): bt_uuid_128,
             cv.Required(CONF_READ_UUID): bt_uuid_128,
             cv.Required(CONF_WRITE_UUID): bt_uuid_128,
+            cv.Optional(CONF_CLIENT_ADDRESS, default=16): cv.positive_int,
+            cv.Optional(CONF_SERVER_ADDRESS, default=1): cv.Any(
+                cv.positive_int,
+                cv.Schema({
+                    cv.Optional(CONF_LOGICAL_DEVICE, default=1): cv.positive_int,
+                    cv.Required(CONF_PHYSICAL_DEVICE): cv.positive_int,
+                    cv.Optional(CONF_ADDRESS_LENGTH, default=2): cv.one_of(1, 2, 4),
+                })
+            ),
+            cv.Optional(CONF_AUTH, default=False): cv.boolean,
+            cv.Optional(CONF_PASSWORD, default=""): cv.string,
         }
     )
     .extend(ble_client.BLE_CLIENT_SCHEMA)
@@ -145,6 +173,16 @@ async def to_code(config):
     if CONF_WRITE_UUID in config:
         cg.add(var.set_write_char_uuid(config[CONF_WRITE_UUID]))
 
+    if isinstance(config[CONF_SERVER_ADDRESS], int):
+        cg.add(var.set_server_address(config[CONF_SERVER_ADDRESS]))
+    else:
+        cg.add(var.set_server_address(config[CONF_SERVER_ADDRESS][CONF_LOGICAL_DEVICE], 
+                                      config[CONF_SERVER_ADDRESS][CONF_PHYSICAL_DEVICE], 
+                                      config[CONF_SERVER_ADDRESS][CONF_ADDRESS_LENGTH]))    
+     
+    cg.add(var.set_client_address(config[CONF_CLIENT_ADDRESS]))
+    cg.add(var.set_auth_required(config[CONF_AUTH]))
+    cg.add(var.set_password(config[CONF_PASSWORD]))
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
 

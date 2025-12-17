@@ -1,21 +1,19 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
-from esphome.const import (
-    CONF_INDEX,
-)
 from . import (
     DlmsCosemBle,
-    CONF_DLMS_COSEM_BLE_ID,
     dlms_cosem_ble_ns,
-    CONF_REQUEST,
-    CONF_SUB_INDEX,
-    validate_request_format,
-    DEFAULTS_MAX_SENSOR_INDEX,
+    obis_code,
+    CONF_DLMS_COSEM_BLE_ID,
+    CONF_OBIS_CODE,
+    CONF_DONT_PUBLISH,
+    CONF_CLASS,
 )
 
 DlmsCosemBleSensor = dlms_cosem_ble_ns.class_("DlmsCosemBleSensor", sensor.Sensor)
 
+CONF_MULTIPLIER = "multiplier"
 
 CONFIG_SCHEMA = cv.All(
     sensor.sensor_schema(
@@ -23,27 +21,21 @@ CONFIG_SCHEMA = cv.All(
     ).extend(
         {
             cv.GenerateID(CONF_DLMS_COSEM_BLE_ID): cv.use_id(DlmsCosemBle),
-            cv.Required(CONF_REQUEST): cv.All(cv.string, validate_request_format),
-            cv.Optional(CONF_INDEX, default=1): cv.int_range(
-                min=1, max=DEFAULTS_MAX_SENSOR_INDEX
-            ),
-            cv.Optional(CONF_SUB_INDEX, default=0): cv.int_range(
-                min=0, max=255
-            ),
+            cv.Required(CONF_OBIS_CODE): obis_code,
+            cv.Optional(CONF_DONT_PUBLISH, default=False): cv.boolean,
+            cv.Optional(CONF_MULTIPLIER, default=1.0): cv.float_,
+            cv.Optional(CONF_CLASS, default=3): cv.int_,
         }
     ),
-    cv.has_exactly_one_key(CONF_REQUEST),
+    cv.has_exactly_one_key(CONF_OBIS_CODE),
 )
 
 
 async def to_code(config):
     component = await cg.get_variable(config[CONF_DLMS_COSEM_BLE_ID])
     var = await sensor.new_sensor(config)
-
-    if CONF_REQUEST in config:
-        cg.add(var.set_request(config[CONF_REQUEST]))
-
-    cg.add(var.set_index(config[CONF_INDEX]))
-    cg.add(var.set_sub_index(config[CONF_SUB_INDEX]))
-
+    cg.add(var.set_obis_code(config[CONF_OBIS_CODE]))
+    cg.add(var.set_dont_publish(config.get(CONF_DONT_PUBLISH)))
+    cg.add(var.set_multiplier(config[CONF_MULTIPLIER]))
+    cg.add(var.set_obis_class(config[CONF_CLASS]))
     cg.add(component.register_sensor(var))

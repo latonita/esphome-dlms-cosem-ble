@@ -62,14 +62,20 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   void set_read_char_uuid(const char *uuid_str) { this->read_char_uuid_ = espbt::ESPBTUUID::from_raw(uuid_str); }
 
   // DLMS configuration
+  void set_client_address(uint16_t addr) { this->client_address_ = addr; };
+
   void set_server_address(uint16_t addr);
   uint16_t set_server_address(uint16_t logicalAddress, uint16_t physicalAddress, unsigned char addressSize);
   void update_server_address(uint16_t addr);
   uint16_t update_server_address(uint16_t logicalAddress, uint16_t physicalAddress, unsigned char addressSize);
 
+  void set_auth_required(bool auth) { this->auth_required_ = auth; };
+  void set_password(const std::string &addr) { this->password_ = addr; };
+
   // Sensors
   void set_signal_strength(sensor::Sensor *signal_strength) { signal_strength_ = signal_strength; }
 
+  // OBIS sensors
   void register_sensor(DlmsCosemBleSensorBase *sensor);
 
   // Lambda actions
@@ -103,10 +109,6 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
     SESSION_RELEASE,
     DISCONNECT_REQ,
 
-    //    PREPARING_COMMAND,
-    SENDING_COMMAND,
-    READING_RESPONSE,
-    GOT_RESPONSE,
     PUBLISH,
     ERROR,
     DISCONNECTED
@@ -117,16 +119,15 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   const LogString *state_to_string(FsmState state) const;
   void log_state_(FsmState *next_state = nullptr);
 
-//  const char *state_to_string_(FsmState state) const;
+  //  const char *state_to_string_(FsmState state) const;
   void set_next_state_(FsmState state);
   void set_next_state_delayed_(uint32_t delay_ms, FsmState next_state);
-  
-  
+
   //  void prepare_request_frame_(const ::std::string &request);
-  void send_next_fragment_();
+  void send_next_ble_fragment_();
 
   // BLE send/receive
-  uint16_t get_max_payload_() const;
+  uint16_t get_max_ble_payload_() const;
   void run_in_ble_thread_(const ble_defer_fn_t &fn);
   ble_defer_fn_t ble_defer_fn_{nullptr};
 
@@ -151,7 +152,11 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
       bool pin_code_was_requested : 1;
       bool auth_completed : 1;
       bool tx_error : 1;
+
       bool rx_reply : 1;
+      bool tx_started : 1;
+      bool tx_completed : 1;
+      bool tx_more_after : 1;
     };
   } ble_flags_{0};
 
@@ -205,6 +210,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
                               bool mission_critical = false, bool clear_buffer = true);
 
   // State handler methods extracted from loop()
+  void handle_comms_tx_();
   void handle_comms_rx_();
   void handle_open_session_();
   void handle_buffers_req_();
@@ -221,6 +227,8 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   void handle_publish_();
   int set_sensor_scale_and_unit(DlmsCosemBleSensor *sensor);
   int set_sensor_value(DlmsCosemBleSensorBase *sensor, const char *obis);
+
+  bool skip_unit_request_{false};
 
   struct {
     ReadFunction read_fn;
@@ -288,7 +296,7 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
 
   void clear_rx_buffers_();
 
-  void send_dlms_messages_();
+  void queue_dlms_messages_();
   size_t receive_frame_(FrameStopFunction stop_fn);
 
   size_t receive_frame_hdlc_();
@@ -313,7 +321,6 @@ class DlmsCosemBleComponent : public PollingComponent, public ble_client::BLECli
   } stats_;
   void stats_dump();
   bool has_error{true};
-
 };
 
 }  // namespace dlms_cosem_ble

@@ -235,12 +235,7 @@ void DlmsCosemBleComponent::loop() {
     } break;
 
     case FsmState::COMMS_TX: {
-      this->log_state_();
-      if (buffers_.has_more_messages_to_send()) {
-        send_dlms_messages_();
-      } else {
-        this->set_next_state_(FsmState::COMMS_RX);
-      }
+      this->handle_comms_tx_();
     } break;
 
     case FsmState::COMMS_RX: {
@@ -256,6 +251,8 @@ void DlmsCosemBleComponent::loop() {
     } break;
 
     case FsmState::MISSION_FAILED: {
+      this->parent_->disconnect();
+      this->set_next_state_(FsmState::IDLE);
     } break;
 
     case FsmState::BUFFERS_RCV: {
@@ -268,6 +265,14 @@ void DlmsCosemBleComponent::loop() {
 
     case FsmState::ASSOCIATION_RCV: {
       this->handle_association_rcv_();
+    } break;
+
+    case FsmState::DATA_ENQ_UNIT: {
+      this->handle_data_enq_unit_();
+    } break;
+
+    case FsmState::DATA_ENQ: {
+      this->handle_data_enq_();
     } break;
 
     case FsmState::DATA_RECV: {
@@ -307,13 +312,13 @@ void DlmsCosemBleComponent::loop() {
       //   // }
       // } break;
 
-    case FsmState::READING_RESPONSE: {
-      if (this->ble_flags_.rx_reply) {
-        SET_STATE(FsmState::GOT_RESPONSE);
-      }
-    } break;
+      // case FsmState::READING_RESPONSE: {
+      //   if (this->ble_flags_.rx_reply) {
+      //     SET_STATE(FsmState::GOT_RESPONSE);
+      //   }
+      // } break;
 
-    case FsmState::GOT_RESPONSE: {
+      //  case FsmState::GOT_RESPONSE: {
       // do {
       //   if (this->rx_len_ == 0)
       //     break;
@@ -354,6 +359,9 @@ void DlmsCosemBleComponent::loop() {
       // this->request_iter = this->sensors_.upper_bound(this->request_iter->first);
       // this->rx_len_ = 0;
       // SET_STATE(FsmState::PREPARING_COMMAND);
+      //    } break;
+    case FsmState::SESSION_RELEASE: {
+      this->handle_session_release_();
     } break;
 
     case FsmState::PUBLISH: {
@@ -361,9 +369,9 @@ void DlmsCosemBleComponent::loop() {
       //   this->sensor_iter->second->publish();
       //   this->sensor_iter++;
       // } else {
-      //   if (this->signal_strength_ != nullptr) {
-      //     this->signal_strength_->publish_state(this->rssi_);
-      //   }
+      if (this->signal_strength_ != nullptr) {
+        this->signal_strength_->publish_state(this->rssi_);
+      }
       SET_STATE(FsmState::IDLE);
       //      }
     } break;
@@ -372,6 +380,40 @@ void DlmsCosemBleComponent::loop() {
       // do nothing
       break;
   }
+}
+
+void DlmsCosemBleComponent::handle_comms_tx_() {
+  this->log_state_();
+
+  if (this->ble_flags_.tx_error) {
+    ESP_LOGE(TAG, "TX error.");
+    this->has_error = true;
+    this->dlms_reading_state_.last_error = DLMS_ERROR_CODE_HARDWARE_FAULT;
+    this->stats_.invalid_frames_ += reading_state_.err_invalid_frames;
+
+    if (reading_state_.mission_critical) {
+      ESP_LOGE(TAG, "Mission critical TX error.");
+      this->abort_mission_();
+    } else {
+      // if not move forward
+      reading_state_.err_invalid_frames++;
+      this->set_next_state_(reading_state_.next_state);
+    }
+    return;
+  }
+
+  if (!this->ble_flags_.tx_started && buffers_.has_more_messages_to_send()) {
+    this->ble_flags_.tx_started = true;
+    this->queue_dlms_messages_();
+  }
+
+  if (!this->ble_flags_.tx_completed) {
+    // still sending
+    return;
+  }
+  ESP_LOGVV(TAG, "TX completed");
+
+  this->set_next_state_(FsmState::COMMS_RX);
 }
 
 void DlmsCosemBleComponent::handle_comms_rx_() {
@@ -407,7 +449,8 @@ void DlmsCosemBleComponent::handle_comms_rx_() {
   // 4. check reply->complete. if it is 0 then continue reading, go to 1
   //
   // read hdlc frame
-  received_frame_size_ = this->receive_frame_hdlc_();
+  received_frame_size_ = buffers_.in.size;  // this->receive_frame_hdlc_();
+  // BLE - better check for full HDLC frame in the buffer?
 
   if (received_frame_size_ == 0) {
     // keep reading until proper frame is received
@@ -507,6 +550,33 @@ void DlmsCosemBleComponent::handle_association_rcv_() {
   this->set_next_state_(FsmState::DATA_ENQ_UNIT);
 }
 
+void DlmsCosemBleComponent::handle_data_enq_unit_() {
+  this->log_state_();
+  if (this->loop_state_.request_iter == this->sensors_.end()) {
+    ESP_LOGD(TAG, "All requests done");
+    this->set_next_state_(FsmState::SESSION_RELEASE);
+    return;
+  }
+
+  auto req = this->loop_state_.request_iter->first;
+  auto sens = this->loop_state_.request_iter->second;
+  auto type = sens->get_obis_class();
+
+  ESP_LOGD(TAG, "OBIS code: %s, Sensor: %s", req.c_str(), sens->get_sensor_name().c_str());
+
+  // request units for numeric sensors only and only once
+  if (!this->skip_unit_request_ && sens->get_type() == SensorType::SENSOR && type == DLMS_OBJECT_TYPE_REGISTER &&
+      !sens->has_got_scale_and_unit()) {
+    // if (type == DLMS_OBJECT_TYPE_REGISTER)
+    //        if (sens->get_attribute() != 2) {
+    this->buffers_.gx_attribute = 3;
+    this->prepare_and_send_dlms_data_unit_request(req.c_str(), type);
+  } else {
+    // units not working so far... so we are requesting just data
+    this->set_next_state_(FsmState::DATA_ENQ);
+  }
+}
+
 void DlmsCosemBleComponent::handle_data_enq_() {
   this->log_state_();
   if (this->loop_state_.request_iter == this->sensors_.end()) {
@@ -547,6 +617,14 @@ void DlmsCosemBleComponent::handle_data_next_() {
   }
 }
 
+void DlmsCosemBleComponent::handle_session_release_() {
+  this->log_state_();
+  ESP_LOGD(TAG, "Session released.");
+  this->parent_->disconnect();
+  //  this->stats_.connections_successful_++;
+  this->set_next_state_(FsmState::PUBLISH);
+}
+
 void DlmsCosemBleComponent::clear_rx_buffers_() {
   memset(this->buffers_.in.data, 0, buffers_.in.capacity);
   this->buffers_.in.size = 0;
@@ -560,13 +638,14 @@ size_t DlmsCosemBleComponent::receive_frame_hdlc_() {
   //   return ret;
   // };
   // return receive_frame_(frame_end_check_hdlc);
-  return 0;
+  return buffers_.in.size;
 }
 
-void DlmsCosemBleComponent::send_dlms_messages_() {
+void DlmsCosemBleComponent::queue_dlms_messages_() {
   // this schedules sending from BLE thread
-  this->send_next_fragment_();
-  
+  this->send_next_ble_fragment_();
+  this->update_last_rx_time_();
+
   // // const int MAX_BYTES_IN_ONE_SHOT = 64;
   // gxByteBuffer *buffer = buffers_.out_msg.data[buffers_.out_msg_index];
 
@@ -621,24 +700,24 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_aarq() {
   this->send_dlms_req_and_next(make, parse, FsmState::ASSOCIATION_RCV);
 }
 
-// void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *obis, int type) {
-//   auto ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
-//   if (ret != DLMS_ERROR_CODE_OK) {
-//     ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
-//     this->set_next_state_(FsmState::DATA_ENQ);
-//     return;
-//   }
+void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *obis, int type) {
+  auto ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
+  if (ret != DLMS_ERROR_CODE_OK) {
+    ESP_LOGE(TAG, "cosem_init error %d '%s'", ret, dlms_error_to_string(ret));
+    this->set_next_state_(FsmState::DATA_ENQ);
+    return;
+  }
 
-//   auto make = [this]() {
-//     return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-//                    &this->buffers_.out_msg);
-//   };
-//   auto parse = [this]() {
-//     return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-//                           &this->buffers_.reply.dataValue);
-//   };
-//   this->send_dlms_req_and_next(make, parse, FsmState::DATA_ENQ, false, false);
-// }
+  auto make = [this]() {
+    return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                   &this->buffers_.out_msg);
+  };
+  auto parse = [this]() {
+    return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                          &this->buffers_.reply.dataValue);
+  };
+  this->send_dlms_req_and_next(make, parse, FsmState::DATA_ENQ, false, false);
+}
 
 void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis, int type, bool reg_init) {
   int ret = DLMS_ERROR_CODE_OK;
@@ -709,8 +788,10 @@ void DlmsCosemBleComponent::send_dlms_req_and_next(DlmsRequestMaker maker, DlmsR
 
   this->rx_len_ = 0;
 
-  this->ble_flags_.tx_error = false;
   this->ble_flags_.rx_reply = false;
+  this->ble_flags_.tx_started = false;
+  this->ble_flags_.tx_completed = false;
+  this->ble_flags_.tx_error = false;
 
   this->set_next_state_(FsmState::COMMS_TX);
 }
@@ -939,7 +1020,8 @@ void DlmsCosemBleComponent::try_connect() {
   this->parent_->connect();
 }
 
-void DlmsCosemBleComponent::send_next_fragment_() {
+void DlmsCosemBleComponent::send_next_ble_fragment_() {
+  this->update_last_rx_time_();
   this->run_in_ble_thread_([this]() {
     // this->ble_flags_.tx_error = ;
     this->ble_send_next_fragment_();
@@ -986,10 +1068,10 @@ bool DlmsCosemBleComponent::ble_discover_characteristics_() {
   return result;
 }
 
-uint16_t DlmsCosemBleComponent::get_max_payload_() const {
-  if (this->mtu_ <= 4)
+uint16_t DlmsCosemBleComponent::get_max_ble_payload_() const {
+  if (this->mtu_ <= 3)
     return 0;
-  return this->mtu_ - 4;
+  return this->mtu_ - 3;
 }
 
 void DlmsCosemBleComponent::run_in_ble_thread_(const ble_defer_fn_t &fn) {
@@ -1006,7 +1088,7 @@ bool DlmsCosemBleComponent::ble_send_next_fragment_() {
     return false;
   }
 
-  uint16_t max_payload = this->get_max_payload_();
+  uint16_t max_payload = this->get_max_ble_payload_();
   if (max_payload == 0) {
     ESP_LOGW(TAG, "MTU too small to carry command data");
     return false;
@@ -1020,10 +1102,9 @@ bool DlmsCosemBleComponent::ble_send_next_fragment_() {
     return false;
   }
 
-  bool more_after_this{false};
-  if (bytes_to_send > max_payload) {
+  this->ble_flags_.tx_more_after = bytes_to_send > max_payload;
+  if (this->ble_flags_.tx_more_after) {
     bytes_to_send = max_payload;
-    more_after_this = true;
   }
 
   esp_err_t status = esp_ble_gattc_write_char(
@@ -1032,71 +1113,17 @@ bool DlmsCosemBleComponent::ble_send_next_fragment_() {
   // this->write_array(buffer->data + buffers_.out_msg_data_pos, bytes_to_send);
 
   ESP_LOGVV(TAG, "TX: %s", format_hex_pretty(buffer->data + buffers_.out_msg_data_pos, bytes_to_send).c_str());
-
-  // //   this->update_last_rx_time_();
-  buffers_.out_msg_data_pos += bytes_to_send;
-  // // }
-  if (buffers_.out_msg_data_pos >= buffer->size) {
-    buffers_.out_msg_index++;
-  }
-
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "esp_ble_gattc_write_char failed: %d", status);
     return false;
   }
 
-  if (more_after_this) {
-    // this->tx_ptr_ += payload_len;
-    // this->tx_data_remaining_ -= payload_len;
-    this->send_next_fragment_();
-  } else {
-    // this->tx_ptr_ = nullptr;
-    // this->tx_data_remaining_ = 0;
+  buffers_.out_msg_data_pos += bytes_to_send;
+  if (buffers_.out_msg_data_pos >= buffer->size) {
+    buffers_.out_msg_index++;
   }
+
   return true;
-}
-
-void DlmsCosemBleComponent::ble_initiate_fragment_reads_(uint8_t fragments_to_read) {
-  uint8_t fragments = fragments_to_read + 1;
-
-  if (fragments > RX_HANDLES_NUM)
-    fragments = RX_HANDLES_NUM;
-
-  this->rx_fragments_expected_ = fragments;
-  this->rx_current_fragment_ = 0;
-  this->rx_len_ = 0;
-
-  this->ble_request_next_fragment_();
-}
-
-void DlmsCosemBleComponent::ble_request_next_fragment_() {
-  // Fragmented read path not used for this protocol; notifications carry the full payload.
-  this->ble_flags_.rx_reply = true;
-  if (this->rx_len_ == 0) {
-    return;
-  }
-  for (size_t i = 0; i < this->rx_len_; i++) {
-    this->rx_buffer_[i] = this->rx_buffer_[i] & 0x7F;
-  }
-  ESP_LOGV(TAG, "RX: %s", format_frame_pretty(this->rx_buffer_, this->rx_len_).c_str());
-  ESP_LOGVV(TAG, "RX: %s", format_hex_pretty(this->rx_buffer_, this->rx_len_).c_str());
-}
-
-void DlmsCosemBleComponent::ble_read_fragment_(const esp_ble_gattc_cb_param_t::gattc_read_char_evt_param &param) {
-  if (param.status != ESP_GATT_OK) {
-    ESP_LOGW(TAG, "Response read failed (handle 0x%04X): %d", param.handle, param.status);
-    SET_STATE(FsmState::ERROR);
-    return;
-  }
-
-  if (this->rx_len_ + param.value_len > RX_BUFFER_SIZE)
-    return;
-
-  memcpy(this->rx_buffer_ + this->rx_len_, param.value, param.value_len);
-  this->rx_len_ += param.value_len;
-
-  this->rx_current_fragment_++;
-  this->ble_request_next_fragment_();
 }
 
 void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -1156,10 +1183,28 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
 
     } break;
 
-    case ESP_GATTC_READ_CHAR_EVT: {
-      if (param->read.conn_id != this->parent_->get_conn_id())
+      // case ESP_GATTC_READ_CHAR_EVT: {
+      //   if (param->read.conn_id != this->parent_->get_conn_id())
+      //     break;
+      //   this->ble_read_fragment_(param->read);
+      //   break;
+      // }
+    case ESP_GATTC_WRITE_CHAR_EVT: {
+      if (param->write.conn_id != this->parent_->get_conn_id())
         break;
-      this->ble_read_fragment_(param->read);
+      ESP_LOGVV(TAG, "ESP_GATTC_WRITE_CHAR_EVT received (handle = 0x%04X, status=%d)", param->write.handle,
+                param->write.status);
+
+      if (param->write.status == ESP_GATT_OK) {
+        if (this->ble_flags_.tx_more_after) {
+          this->send_next_ble_fragment_();  // queue next fragment
+        } else {
+          this->ble_flags_.tx_completed = true;
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to write characteristic: %d", param->write.status);
+        this->ble_flags_.tx_error = true;
+      }
       break;
     }
 
@@ -1191,6 +1236,7 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
         ESP_LOGW(TAG, "Notification with empty payload received");
         break;
       }
+      this->update_last_rx_time_();
 
       // if (this->rx_len_ > RX_BUFFER_SIZE)
       //   this->rx_len_ = RX_BUFFER_SIZE;
@@ -1221,8 +1267,8 @@ void DlmsCosemBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_
       // this->tx_ptr_ = nullptr;
       // this->tx_data_remaining_ = 0;
       this->rx_len_ = 0;
-      this->rx_fragments_expected_ = 0;
-      this->rx_current_fragment_ = 0;
+      //      this->rx_fragments_expected_ = 0;
+      //      this->rx_current_fragment_ = 0;
 
       if (this->state_ != FsmState::PUBLISH) {
         SET_STATE(FsmState::IDLE);
@@ -1288,27 +1334,31 @@ void DlmsCosemBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_
 }
 
 /*
-    NOT_INITIALIZED = 0,
-    IDLE,
-    STARTING,
+  NOT_INITIALIZED = 0,
+  IDLE,
+  BLE_STARTING,
+  WAIT,
 
-    COMMS_TX,
-    COMMS_RX,
-    MISSION_FAILED,
-    BUFFERS_REQ,
-    BUFFERS_RCV,
-    ASSOCIATION_REQ,
-    ASSOCIATION_RCV,
-    DATA_RECV,
-    DATA_NEXT,
+  COMMS_TX,
+  COMMS_RX,
+  MISSION_FAILED,
 
-    PREPARING_COMMAND,
-    SENDING_COMMAND,
-    READING_RESPONSE,
-    GOT_RESPONSE,
-    PUBLISH,
-    ERROR,
-    DISCONNECTED
+  OPEN_SESSION,
+  BUFFERS_REQ,
+  BUFFERS_RCV,
+  ASSOCIATION_REQ,
+  ASSOCIATION_RCV,
+  DATA_ENQ_UNIT,
+  DATA_ENQ,
+  DATA_RECV,
+  DATA_NEXT,
+
+  SESSION_RELEASE,
+  DISCONNECT_REQ,
+
+  PUBLISH,
+  ERROR,
+  DISCONNECTED
 */
 const LogString *DlmsCosemBleComponent::state_to_string(FsmState state) const {
   switch (state) {
@@ -1318,12 +1368,16 @@ const LogString *DlmsCosemBleComponent::state_to_string(FsmState state) const {
       return LOG_STR("IDLE");
     case FsmState::BLE_STARTING:
       return LOG_STR("BLE_STARTING");
+    case FsmState::WAIT:
+      return LOG_STR("WAIT");
     case FsmState::COMMS_TX:
       return LOG_STR("COMMS_TX");
     case FsmState::COMMS_RX:
       return LOG_STR("COMMS_RX");
     case FsmState::MISSION_FAILED:
       return LOG_STR("MISSION_FAILED");
+    case FsmState::OPEN_SESSION:
+      return LOG_STR("OPEN_SESSION");
     case FsmState::BUFFERS_REQ:
       return LOG_STR("BUFFERS_REQ");
     case FsmState::BUFFERS_RCV:
@@ -1332,19 +1386,18 @@ const LogString *DlmsCosemBleComponent::state_to_string(FsmState state) const {
       return LOG_STR("ASSOCIATION_REQ");
     case FsmState::ASSOCIATION_RCV:
       return LOG_STR("ASSOCIATION_RCV");
+    case FsmState::DATA_ENQ_UNIT:
+      return LOG_STR("DATA_ENQ_UNIT");
     case FsmState::DATA_ENQ:
       return LOG_STR("DATA_ENQ");
     case FsmState::DATA_RECV:
       return LOG_STR("DATA_RECV");
     case FsmState::DATA_NEXT:
       return LOG_STR("DATA_NEXT");
-
-    case FsmState::SENDING_COMMAND:
-      return LOG_STR("SENDING_COMMAND");
-    case FsmState::READING_RESPONSE:
-      return LOG_STR("READING_RESPONSE");
-    case FsmState::GOT_RESPONSE:
-      return LOG_STR("GOT_RESPONSE");
+    case FsmState::SESSION_RELEASE:
+      return LOG_STR("SESSION_RELEASE");
+    case FsmState::DISCONNECT_REQ:
+      return LOG_STR("DISCONNECT_REQ");
     case FsmState::PUBLISH:
       return LOG_STR("PUBLISH");
     case FsmState::ERROR:
