@@ -45,8 +45,8 @@ CONF_CLASS = "class"
 CONF_CP1251 = "cp1251"
 
 
-CONF_READ_UUID = "read_uuid"
-CONF_WRITE_UUID = "write_uuid"
+CONF_TX_UUID = "tx_uuid"
+CONF_RX_UUID = "rx_uuid"
 
 dlms_cosem_ble_ns = cg.esphome_ns.namespace("dlms_cosem_ble")
 DlmsCosemBle = dlms_cosem_ble_ns.class_(
@@ -132,8 +132,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Required(CONF_PIN): cv.int_range(min=0,max=999999),
             cv.Required(CONF_SERVICE_UUID): bt_uuid_128,
-            cv.Required(CONF_READ_UUID): bt_uuid_128,
-            cv.Required(CONF_WRITE_UUID): bt_uuid_128,
+            cv.Required(CONF_TX_UUID): bt_uuid_128,
+            cv.Required(CONF_RX_UUID): bt_uuid_128,
             cv.Optional(CONF_CLIENT_ADDRESS, default=16): cv.positive_int,
             cv.Optional(CONF_SERVER_ADDRESS, default=1): cv.Any(
                 cv.positive_int,
@@ -172,11 +172,11 @@ async def to_code(config):
     if CONF_SERVICE_UUID in config:
         cg.add(var.set_service_uuid(config[CONF_SERVICE_UUID]))
     
-    if CONF_READ_UUID in config:
-        cg.add(var.set_read_char_uuid(config[CONF_READ_UUID]))
+    if CONF_RX_UUID in config:
+        cg.add(var.set_write_char_uuid(config[CONF_RX_UUID]))
     
-    if CONF_WRITE_UUID in config:
-        cg.add(var.set_write_char_uuid(config[CONF_WRITE_UUID]))
+    if CONF_TX_UUID in config:
+        cg.add(var.set_read_char_uuid(config[CONF_TX_UUID]))
 
     if isinstance(config[CONF_SERVER_ADDRESS], int):
         cg.add(var.set_server_address(config[CONF_SERVER_ADDRESS]))
