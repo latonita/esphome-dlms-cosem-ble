@@ -795,16 +795,19 @@ int DlmsCosemBleComponent::set_sensor_value(DlmsCosemBleSensorBase *sensor, cons
 
           if ((object_class == DLMS_OBJECT_TYPE_DATA) || (object_class == DLMS_OBJECT_TYPE_REGISTER) ||
               (object_class == DLMS_OBJECT_TYPE_EXTENDED_REGISTER)) {
-            if (vt == DLMS_DATA_TYPE_DATETIME || vt == DLMS_DATA_TYPE_DATE || vt == DLMS_DATA_TYPE_TIME || vt ==
-                DLMS_DATA_TYPE_OCTET_STRING) {
-              auto data_as_string = dlms_data_as_string(vt, arr->data, arr->size);
-              static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(data_as_string.c_str(),
-                                                                       this->cp1251_conversion_required_);
-            } else {
-              static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(reinterpret_cast<const char *>(arr->data),
-                                                                       this->cp1251_conversion_required_);
-            }
-
+            // if (vt == DLMS_DATA_TYPE_DATETIME || vt == DLMS_DATA_TYPE_DATE || vt == DLMS_DATA_TYPE_TIME || vt ==
+            //     DLMS_DATA_TYPE_OCTET_STRING) {
+            //   auto data_as_string = dlms_data_as_string(vt, arr->data, arr->size);
+            //   static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(data_as_string.c_str(),
+            //                                                            this->cp1251_conversion_required_);
+            // } else {
+            //   static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(reinterpret_cast<const char *>(arr->data),
+            //                                                            this->cp1251_conversion_required_);
+            // }
+            auto text_sensor = static_cast<DlmsCosemBleTextSensor *>(sensor);
+            auto data_as_string =
+                dlms_data_as_string(text_sensor->show_as_hex_ ? DLMS_DATA_TYPE_BIT_STRING : vt, arr->data, arr->size);
+            text_sensor->set_value(data_as_string.c_str(), this->cp1251_conversion_required_);
           } else {
             ESP_LOGW(TAG, "Wrong OBIS class. We can only handle Data (class 1), Registers (class = 3), Extended "
                           "Registers (class = 4), and Clock (class = 8) for text sensors.");

@@ -115,6 +115,7 @@ class DlmsCosemBleTextSensor : public DlmsCosemBleSensorBase, public text_sensor
 
   bool has_got_scale_and_unit() override { return true; }
   void set_cp1251_conversion_required(bool required) { this->cp1251_conversion_required_ = required; }
+  void set_show_as_hex(bool show_as_hex) { this->show_as_hex_ = show_as_hex; }
 
   void set_value(const char *value, bool hub_cp1251_conversion_required) {
     if (this->cp1251_conversion_required_.value_or(hub_cp1251_conversion_required)) {
@@ -129,9 +130,11 @@ class DlmsCosemBleTextSensor : public DlmsCosemBleSensorBase, public text_sensor
   }
 
   optional<bool> cp1251_conversion_required_{nullopt};
+  bool show_as_hex_{false};
 
  protected:
   std::string value_;
+
 
   static void cp1251_to_utf8(char *out, const char *in) {
     static const int table[128] = {
