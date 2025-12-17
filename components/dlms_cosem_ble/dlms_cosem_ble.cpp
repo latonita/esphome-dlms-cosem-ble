@@ -552,7 +552,7 @@ void DlmsCosemBleComponent::handle_publish_() {
     }
     this->loop_state_.sensor_iter++;
   } else {
-//    this->stats_dump();
+    //    this->stats_dump();
     // if (this->crc_errors_per_session_sensor_ != nullptr) {
     //   this->crc_errors_per_session_sensor_->publish_state(this->stats_.crc_errors_per_session());
     // }
@@ -564,7 +564,6 @@ void DlmsCosemBleComponent::handle_publish_() {
     ESP_LOGD(TAG, "Total time: %u ms", millis() - this->loop_state_.session_started_ms);
   }
 }
-
 
 void DlmsCosemBleComponent::clear_rx_buffers_() {
   memset(this->buffers_.in.data, 0, buffers_.in.capacity);
@@ -580,8 +579,7 @@ size_t DlmsCosemBleComponent::receive_frame_hdlc_() {
   // };
   // return receive_frame_(frame_end_check_hdlc);
 
-
-  // it would be nice to check buffer contains full HDLC frame, if not - return 0 
+  // it would be nice to check buffer contains full HDLC frame, if not - return 0
   return buffers_.in.size;
 }
 
@@ -627,7 +625,9 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_data_unit_request(const char *
 
 void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis, int type, bool reg_init) {
   int ret = DLMS_ERROR_CODE_OK;
-  if (reg_init) {
+  if (type == DLMS_OBJECT_TYPE_CLOCK) {
+    ret = cosem_init(BASE(this->buffers_.gx_clock), (DLMS_OBJECT_TYPE) type, obis);
+  } else if (reg_init) {
     ret = cosem_init(BASE(this->buffers_.gx_register), (DLMS_OBJECT_TYPE) type, obis);
   }
   if (ret != DLMS_ERROR_CODE_OK) {
@@ -636,13 +636,18 @@ void DlmsCosemBleComponent::prepare_and_send_dlms_data_request(const char *obis,
     return;
   }
 
-  auto make = [this]() {
-    return cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-                   &this->buffers_.out_msg);
+  auto make = [this, type]() {
+    return (type == DLMS_OBJECT_TYPE_CLOCK) ? cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_clock),
+                                                      this->buffers_.gx_attribute, &this->buffers_.out_msg)
+                                            : cl_read(&this->dlms_settings_, BASE(this->buffers_.gx_register),
+                                                      this->buffers_.gx_attribute, &this->buffers_.out_msg);
   };
-  auto parse = [this]() {
-    return cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
-                          &this->buffers_.reply.dataValue);
+  auto parse = [this, type]() {
+    return (type == DLMS_OBJECT_TYPE_CLOCK)
+               ? cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_clock), this->buffers_.gx_attribute,
+                                &this->buffers_.reply.dataValue)
+               : cl_updateValue(&this->dlms_settings_, BASE(this->buffers_.gx_register), this->buffers_.gx_attribute,
+                                &this->buffers_.reply.dataValue);
   };
   this->send_dlms_req_and_next(make, parse, FsmState::DATA_RECV);
 }
@@ -759,32 +764,51 @@ int DlmsCosemBleComponent::set_sensor_value(DlmsCosemBleSensorBase *sensor, cons
 
 #ifdef USE_TEXT_SENSOR
     if (sensor->get_type() == SensorType::TEXT_SENSOR) {
-      auto var = &this->buffers_.gx_register.value;
-      if (var && var->byteArr && var->byteArr->size > 0) {
-        auto arr = var->byteArr;
+      if (object_class == DLMS_OBJECT_TYPE_CLOCK) {
+        static char obis_datetime_str[32];
+        auto clock_gx_time = &this->buffers_.gx_clock.time;
+        auto dt = clock_gx_time->value;
+        time_t t = (time_t) dt;
+        struct tm tm_val;
+        // Use localtime_r for thread safety
+        localtime_r(&t, &tm_val);
 
-        ESP_LOGV(TAG, "data size=%d", arr->size);
+        // Format as ISO 8601: YYYY-MM-DD HH:MM:SS
+        strftime(obis_datetime_str, sizeof(obis_datetime_str), "%Y-%m-%d %H:%M:%S", &tm_val);
 
-        bb_setInt8(arr, 0);     // add null-termination
-        if (arr->size > 128) {  // clip the string
-          ESP_LOGW(TAG, "String is too long %d, clipping to 128 bytes", arr->size);
-          arr->data[127] = '\0';
-        }
-        ESP_LOGV(TAG, "DATA: %s", format_hex_pretty(arr->data, arr->size).c_str());
+        ESP_LOGD(TAG, "OBIS code: %s, Clock: %s", obis, obis_datetime_str);
+        static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(obis_datetime_str, this->cp1251_conversion_required_);
+        return this->dlms_reading_state_.last_error;
+      } else {
+        auto var = &this->buffers_.gx_register.value;
+        if (var && var->byteArr && var->byteArr->size > 0) {
+          auto arr = var->byteArr;
 
-        if ((object_class == DLMS_OBJECT_TYPE_DATA) || (object_class == DLMS_OBJECT_TYPE_REGISTER) ||
-            (object_class == DLMS_OBJECT_TYPE_EXTENDED_REGISTER)) {
-          if (vt == DLMS_DATA_TYPE_DATETIME) {
-            auto data_as_string = dlms_data_as_string(vt, arr->data, arr->size);
-            static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(data_as_string.c_str(),
-                                                                     this->cp1251_conversion_required_);
-          } else {
-            static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(reinterpret_cast<const char *>(arr->data),
-                                                                     this->cp1251_conversion_required_);
+          ESP_LOGV(TAG, "data size=%d", arr->size);
+
+          bb_setInt8(arr, 0);     // add null-termination
+          if (arr->size > 128) {  // clip the string
+            ESP_LOGW(TAG, "String is too long %d, clipping to 128 bytes", arr->size);
+            arr->data[127] = '\0';
           }
-        } else {
-          ESP_LOGW(TAG, "Wrong OBIS class. We can only handle Data (class 1), Registers (class = 3) and Extended "
-                        "Registers (class = 4)");
+          ESP_LOGV(TAG, "DATA: %s", format_hex_pretty(arr->data, arr->size).c_str());
+
+          if ((object_class == DLMS_OBJECT_TYPE_DATA) || (object_class == DLMS_OBJECT_TYPE_REGISTER) ||
+              (object_class == DLMS_OBJECT_TYPE_EXTENDED_REGISTER)) {
+            if (vt == DLMS_DATA_TYPE_DATETIME || vt == DLMS_DATA_TYPE_DATE || vt == DLMS_DATA_TYPE_TIME || vt ==
+                DLMS_DATA_TYPE_OCTET_STRING) {
+              auto data_as_string = dlms_data_as_string(vt, arr->data, arr->size);
+              static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(data_as_string.c_str(),
+                                                                       this->cp1251_conversion_required_);
+            } else {
+              static_cast<DlmsCosemBleTextSensor *>(sensor)->set_value(reinterpret_cast<const char *>(arr->data),
+                                                                       this->cp1251_conversion_required_);
+            }
+
+          } else {
+            ESP_LOGW(TAG, "Wrong OBIS class. We can only handle Data (class 1), Registers (class = 3), Extended "
+                          "Registers (class = 4), and Clock (class = 8) for text sensors.");
+          }
         }
       }
     }

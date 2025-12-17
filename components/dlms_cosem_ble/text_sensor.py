@@ -18,6 +18,7 @@ DlmsCosemBleTextSensor = dlms_cosem_ble_ns.class_(
     "DlmsCosemBleTextSensor", text_sensor.TextSensor
 )
 
+# class can be 1,3,4,8
 
 CONFIG_SCHEMA = cv.All(
     text_sensor.text_sensor_schema(
@@ -27,7 +28,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_DLMS_COSEM_BLE_ID): cv.use_id(DlmsCosemBle),
             cv.Required(CONF_OBIS_CODE): obis_code,
             cv.Optional(CONF_DONT_PUBLISH, default=False): cv.boolean,
-            cv.Optional(CONF_CLASS, default=1): cv.int_,
+            cv.Optional(CONF_CLASS, default=1): cv.one_of(1, 3, 4, 8, int=True),
             cv.Optional(CONF_CP1251): cv.boolean,
         }
     ),
